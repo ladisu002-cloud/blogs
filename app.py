@@ -155,15 +155,19 @@ CTA 링크: {link}
 ###END###
 """
 
-    model = client.GenerativeModel(
-        "gemini-2.5-flash",  # 무료 티어 사용 가능 모델
-        system_instruction=cfg["system"],
-    )
-    resp = model.generate_content(
-        user_prompt,
-        generation_config=genai.types.GenerationConfig(max_output_tokens=1500, temperature=0.8),
-    )
-    text = resp.text
+    def call_model(model_name):
+        model = client.GenerativeModel(model_name, system_instruction=cfg["system"])
+        resp = model.generate_content(
+            user_prompt,
+            generation_config=genai.types.GenerationConfig(max_output_tokens=1500, temperature=0.8),
+        )
+        return resp.text
+
+    try:
+        text = call_model("gemini-flash-latest")
+    except Exception:
+        # 최신 별칭이 막혀 있을 경우를 대비한 보조 모델
+        text = call_model("gemini-flash-lite-latest")
 
     title = extract_between(text, "###TITLE###", "###META###")
     meta = extract_between(text, "###META###", "###TAGS###")
@@ -193,7 +197,7 @@ if client is None:
     client = get_client()
 
 with st.sidebar:
-    st.caption("🆓 Gemini 2.5 Flash 무료 티어 사용 중 — 분당 10회, 하루 250회 요청까지 무료")
+    st.caption("🆓 Gemini Flash 무료 티어 사용 중 (모델은 Google이 자동으로 최신 버전 유지) — 한도는 계정별로 다를 수 있으니 AI Studio에서 확인하세요")
     st.divider()
     st.subheader("📦 공용 스킨 CSS")
     st.caption("티스토리 관리자 → 꾸미기 → 스킨 편집 → CSS 탭 맨 아래에 한 번만 붙여넣으세요.")
