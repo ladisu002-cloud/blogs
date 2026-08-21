@@ -110,7 +110,7 @@ SKIN_CLASSES_DOC = """
 - <div class="jb-post"> : 전체 글 감싸는 최외곽 wrapper (필수, 1개)
 - <div class="jb-hero">...</div> : 글 맨 위 히어로 배너 (필수, 1개)
 - <div class="jb-cta-wrap"><a class="jb-cta" href="LINK">버튼 텍스트👆</a></div> : CTA 버튼
-- <div class="jb-h2">섹션 제목</div> : 섹션 제목, 이모지 1개 포함. 3~4개 사용
+- <div class="jb-h2">섹션 제목</div> : 섹션 제목, 이모지 1개 포함. 분량 목표에 맞춰 4~6개 사용
 - <div class="jb-info">...</div> : 기본정보 요약 카드 (jb-info-row/label/val 조합, 선택)
 - <div class="jb-spot-list"><div class="jb-spot-item"><div class="jb-spot-icon">이모지</div><div class="jb-spot-body"><div class="jb-spot-name">이름</div><div class="jb-spot-desc">1~2문장 설명</div></div></div>...</div>
   : 명소/프로그램/추천항목 등 나열형 정보를 카드 리스트로 보여줄 때 사용 (3~4개 항목)
@@ -124,7 +124,7 @@ SKIN_CLASSES_DOC = """
 - 일반 문단은 <p>텍스트</p>
 
 작성 규칙:
-- 전체 응답은 1100토큰 이내로 끝나야 하므로 섹션은 3~4개로 제한하고 간결하게 쓸 것 (반드시 ###END### 까지 도달)
+- 본문 분량 목표에 맞춰 충분히 작성하고, 마지막에 반드시 ###END### 까지 도달할 것 (중간에 끊지 말 것)
 - 모든 태그를 빠짐없이 닫을 것
 - 코드펜스나 설명 문구 없이, 지정된 마커 형식으로만 응답할 것
 """
@@ -138,7 +138,7 @@ TEXT_RULES_DOC = """
 - 이미지가 들어갈 자리는 줄 단독으로 "[이미지1]"처럼 표시
 - 링크를 넣을 자리는 반드시 아래 형식 그대로 표시:
   🛒 [상품명] 최저가 확인하기 → LINK
-- 전체 응답은 900토큰 이내로 끝나야 하므로 간결하게 쓸 것 (반드시 ###END### 까지 도달)
+- 본문 분량 목표에 맞춰 충분히 작성하고, 마지막에 반드시 ###END### 까지 도달할 것 (중간에 끊지 말 것)
 - 코드펜스나 설명 문구 없이, 지정된 마커 형식으로만 응답할 것
 """
 
@@ -189,8 +189,8 @@ TONE_OPTIONS = {
     "전문적 문어체": "전문적이고 신뢰감 있는 문어체",
 }
 LENGTH_OPTIONS = {
-    "짧게": "핵심 위주로 짧고 간결하게",
-    "보통": "보통 분량으로 핵심과 배경 설명 포함",
+    "짧게": "(공백 제외) 1500~2000자 분량으로 핵심만 간결하게",
+    "보통": "(공백 제외) 3000자 이상, 검색엔진이 '깊이 있는 정보'로 평가할 만큼 충분한 근거·사례·세부 설명을 갖춰 작성",
 }
 
 DISCLOSURE_TEXT = "본 포스팅은 쿠팡 파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받습니다."
@@ -266,18 +266,39 @@ def generate_post(client, mode, topic, link1, link2, tone_key, length_key, extra
 ###END###
 """
 
-    def call_model(model_name):
+    def call_model(model_name, thinking_budget):
         model = client.GenerativeModel(model_name, system_instruction=cfg["system"])
+        gen_kwargs = {"max_output_tokens": 8192, "temperature": 0.8}
+        if thinking_budget is not None:
+            # 최신 Gemini 모델은 기본적으로 '생각(thinking)' 토큰을 먼저 쓴다.
+            # 완전히 0으로 끄면 다중 조건 준수(키워드 배치·구조·분량)의 품질이 떨어질 수 있어
+            # 소량만 남겨두고, 그래도 모자라면 0으로, 그래도 안 되면 필드 자체를 빼고 재시도한다.
+            gen_kwargs["thinking_config"] = genai.types.ThinkingConfig(thinking_budget=thinking_budget)
         resp = model.generate_content(
-            user_prompt,
-            generation_config=genai.types.GenerationConfig(max_output_tokens=1600, temperature=0.8),
+            user_prompt, generation_config=genai.types.GenerationConfig(**gen_kwargs)
         )
         return resp.text
 
-    try:
-        raw = call_model("gemini-flash-latest")
-    except Exception:
-        raw = call_model("gemini-flash-lite-latest")
+    raw, best = None, None
+    for model_name in ("gemini-flash-latest", "gemini-flash-lite-latest"):
+        for thinking_budget in (1024, 0, None):
+            try:
+                candidate = call_model(model_name, thinking_budget)
+            except Exception:
+                continue
+            if not candidate or not candidate.strip():
+                continue
+            if best is None or len(candidate) > len(best):
+                best = candidate
+            if "###END###" in candidate:  # 마커까지 도달했는지로 '완결' 여부를 실제 확인
+                raw = candidate
+                break
+        if raw:
+            break
+    if not raw:
+        if not best:
+            raise RuntimeError("모델 응답을 받지 못했습니다. 잠시 후 다시 시도해 주세요.")
+        raw = best  # 완결 마커는 없지만 그나마 가장 긴 응답으로 대체 (아래에서 안전하게 파싱)
 
     title = extract_between(raw, "###TITLE###", "###META###")
     meta = extract_between(raw, "###META###", "###TAGS###")
@@ -309,8 +330,8 @@ def run_seo_check(mode, cfg, topic, title, meta, tags, content, images):
 
     kw_count = plain.lower().count(topic.lower()) + title.lower().count(topic.lower())
     checks.append((
-        "키워드 반복", "ok" if 5 <= kw_count <= 9 else ("warn" if kw_count > 0 else "bad"),
-        f"'{topic}' {kw_count}회 등장 (목표 5~7회)",
+        "키워드 반복", "ok" if 5 <= kw_count <= 12 else ("warn" if kw_count > 0 else "bad"),
+        f"'{topic}' {kw_count}회 등장 (목표 5~7회, 분량이 길면 다소 더 많아도 무방)",
     ))
     checks.append((
         "제목 길이/키워드", "ok" if len(title) <= 32 and topic.lower() in title.lower() else "warn",
@@ -335,7 +356,7 @@ def run_seo_check(mode, cfg, topic, title, meta, tags, content, images):
 
     if cfg["format"] == "html":
         h2_count = content.count("jb-h2")
-        checks.append(("소제목 개수", "ok" if 3 <= h2_count <= 5 else "warn", f"jb-h2 {h2_count}개"))
+        checks.append(("소제목 개수", "ok" if 4 <= h2_count <= 7 else "warn", f"jb-h2 {h2_count}개"))
         cta_count = content.count("jb-cta\"")
         checks.append(("CTA 버튼", "ok" if cta_count >= 2 else "warn", f"{cta_count}회 등장 (목표 2회)"))
         checks.append(("Q&A 포함", "ok" if "jb-qa" in content else "warn", "포함" if "jb-qa" in content else "미포함"))
@@ -358,6 +379,12 @@ def run_seo_check(mode, cfg, topic, title, meta, tags, content, images):
     checks.append((
         "이미지 자리/프롬프트 매칭", "ok" if slot_count > 0 and slot_count == len(images) else "warn",
         f"본문 자리 {slot_count}개 / 프롬프트 {len(images)}개",
+    ))
+
+    char_count = len(re.sub(r"\s+", "", plain))
+    checks.append((
+        "본문 글자수", "ok" if char_count >= 1400 else "warn",
+        f"공백 제외 약 {char_count}자 (SEO 상 3,000자 이상 권장, '짧게' 선택 시 1,500자 이상)",
     ))
 
     return checks
