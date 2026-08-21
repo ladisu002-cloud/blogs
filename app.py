@@ -26,6 +26,14 @@ AD_SLOT_RULES = (
     "① 도입부 첫 CTA 버튼 바로 다음 ② 두 번째 jb-h2 섹션이 끝난 직후 ③ jb-qa(Q&A) 시작 바로 전."
 )
 
+# 이미지 생성 프롬프트 규칙 (모든 카테고리 공통 — 실제 이미지는 생성하지 않고, 자리 표시 + 영어 프롬프트만 제공)
+IMAGE_PROMPT_RULES = (
+    "이미지는 2~4개면 충분합니다. 이미지가 들어가면 좋을 자리마다 본문에 [이미지1], [이미지2]처럼 "
+    "번호가 매겨진 자리 표시를 넣고, 그 번호와 정확히 일치하는 영어 이미지 생성 프롬프트를 "
+    "본문과 별도로 ###IMAGES### 섹션에 한 줄씩 작성하세요 (예: [이미지1] A cozy realistic photo of ...). "
+    "프롬프트는 사실적인 사진 스타일로 피사체·구도·조명·분위기를 구체적으로 묘사하세요."
+)
+
 MODE_CONFIG = {
     "지원금/제도": {
         "format": "html",
@@ -43,7 +51,7 @@ MODE_CONFIG = {
             "확실하지 않은 수치는 '지자체·연도별로 다를 수 있음'으로 처리하세요. "
             "CTA 버튼은 정확히 2번 사용합니다: 첫 번째는 도입부 직후, 링크1로 '신청하러 가기👆' 텍스트. "
             "두 번째는 Q&A 섹션 바로 다음, 링크2로 '자격 조회하기👆' 텍스트. "
-            + QUALITY_RULES + " " + AD_SLOT_RULES
+            + QUALITY_RULES + " " + AD_SLOT_RULES + " " + IMAGE_PROMPT_RULES
         ),
     },
     "축제/행사": {
@@ -59,7 +67,7 @@ MODE_CONFIG = {
             "반드시 jb-spot-list 카드 목록(아이콘 + 짧은 이름 + 1~2문장 설명)으로 3~4개씩 작성하세요. "
             "그 다음 기본 정보(기간/장소/교통/주차) → 방문 꿀팁 → 함께 즐기면 좋은 다른 행사 순으로 구성하세요. "
             "CTA 버튼은 정확히 2번, 같은 링크로 '공식 홈페이지 바로가기👆' 텍스트를 사용하세요. "
-            + QUALITY_RULES + " " + AD_SLOT_RULES
+            + QUALITY_RULES + " " + AD_SLOT_RULES + " " + IMAGE_PROMPT_RULES
         ),
     },
     "일반 블로그": {
@@ -75,7 +83,7 @@ MODE_CONFIG = {
             "jb-spot-list 카드 목록으로 정리하면 가독성이 좋습니다(해당될 때만). "
             "왜 중요한지(도입) → 핵심 정보/방법을 섹션별로 → 실수하기 쉬운 점(팁 박스) → Q&A 순으로 구성하세요. "
             "CTA 버튼은 정확히 2번, 같은 링크로 '자세히 보기👆' 텍스트를 사용하세요. "
-            + QUALITY_RULES + " " + AD_SLOT_RULES
+            + QUALITY_RULES + " " + AD_SLOT_RULES + " " + IMAGE_PROMPT_RULES
         ),
     },
     "쿠팡파트너스": {
@@ -92,7 +100,7 @@ MODE_CONFIG = {
             "자주 묻는 질문 3~5개 → 해시태그 순으로 구성하세요. "
             "장점만 나열하지 말고 단점이나 이런 분께는 안 맞을 수 있다는 점도 최소 1곳 솔직하게 언급하세요. "
             "글 맨 앞에는 반드시 '본 포스팅은 쿠팡 파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 "
-            "제공받습니다.'라는 문구를 그대로 포함하세요. " + QUALITY_RULES
+            "제공받습니다.'라는 문구를 그대로 포함하세요. " + QUALITY_RULES + " " + IMAGE_PROMPT_RULES
         ),
     },
 }
@@ -110,6 +118,8 @@ SKIN_CLASSES_DOC = """
 - <div class="jb-table-wrap"><table class="jb-table">...</table></div> : 비교/조건표 (선택)
 - <div class="jb-qa"><div class="jb-qa-item"><div class="jb-qa-q">Q. 질문</div><div class="jb-qa-a">답변</div></div>...</div> : Q&A, 2~3문항
 - <div class="jb-divider">· · ·</div> : 섹션 구분선 (선택)
+- <div class="jb-img-slot">🖼️ [이미지N] 이 자리에 이미지를 삽입하세요</div>
+  : 이미지가 들어갈 자리 표시 (번호는 실제 이미지 순서와 일치시킬 것)
 - <span class="jb-highlight">강조 텍스트</span> : 본문 강조 inline span
 - 일반 문단은 <p>텍스트</p>
 
@@ -125,6 +135,7 @@ TEXT_RULES_DOC = """
 - 소제목은 줄 앞에 이모지 1개 + 짧은 문구로 표시 (예: "✅ 핵심 스펙 비교")
 - 표가 필요하면 "항목: 설명" 형태로 한 줄씩 나열
 - 문단 사이는 빈 줄 하나로 구분
+- 이미지가 들어갈 자리는 줄 단독으로 "[이미지1]"처럼 표시
 - 링크를 넣을 자리는 반드시 아래 형식 그대로 표시:
   🛒 [상품명] 최저가 확인하기 → LINK
 - 전체 응답은 900토큰 이내로 끝나야 하므로 간결하게 쓸 것 (반드시 ###END### 까지 도달)
@@ -169,6 +180,7 @@ SKIN_CSS = """
 .jb-qa-a{font-size:14px;color:#454545;line-height:1.75;}
 .jb-divider{text-align:center;color:#C7BFAE;font-size:13px;margin:28px 0;letter-spacing:.4em;}
 .jb-ad-slot{margin:26px 0;text-align:center;}
+.jb-img-slot{margin:18px 0;padding:40px 16px;text-align:center;background:#F4F1EA;border:2px dashed #D8D0BE;border-radius:12px;color:#8B8371;font-size:14px;}
 """
 
 TONE_OPTIONS = {
@@ -249,6 +261,8 @@ def generate_post(client, mode, topic, link1, link2, tone_key, length_key, extra
 (쉼표로 구분한 태그 5~7개)
 ###CONTENT###
 (완성된 본문 — html 카테고리는 jb-post로 시작하는 HTML, text 카테고리는 순수 텍스트)
+###IMAGES###
+([이미지N] 영어 프롬프트 형식으로 한 줄씩, 본문의 자리 표시 번호와 일치)
 ###END###
 """
 
@@ -268,10 +282,14 @@ def generate_post(client, mode, topic, link1, link2, tone_key, length_key, extra
     title = extract_between(raw, "###TITLE###", "###META###")
     meta = extract_between(raw, "###META###", "###TAGS###")
     tags = extract_between(raw, "###TAGS###", "###CONTENT###")
-    content = extract_between(raw, "###CONTENT###", "###END###")
+    content_end = "###IMAGES###" if "###IMAGES###" in raw else "###END###"
+    content = extract_between(raw, "###CONTENT###", content_end)
     if not content:
         content = raw.split("###CONTENT###")[-1]
     content = re.sub(r"```html|```", "", content).strip()
+
+    images_raw = extract_between(raw, "###IMAGES###", "###END###") if "###IMAGES###" in raw else ""
+    images = re.findall(r"\[(이미지\d+)\]\s*(.+)", images_raw)
 
     if mode == "쿠팡파트너스" and DISCLOSURE_TEXT not in content:
         content = DISCLOSURE_TEXT + "\n\n" + content
@@ -282,10 +300,10 @@ def generate_post(client, mode, topic, link1, link2, tone_key, length_key, extra
         replacement = f'<div class="jb-ad-slot">{ad_code}</div>' if ad_code else ""
         content = content.replace("<!--AD_SLOT-->", replacement)
 
-    return title, meta, tags, content
+    return title, meta, tags, content, images
 
 
-def run_seo_check(mode, cfg, topic, title, meta, tags, content):
+def run_seo_check(mode, cfg, topic, title, meta, tags, content, images):
     checks = []
     plain = re.sub(r"<[^>]+>", " ", content)
 
@@ -335,6 +353,12 @@ def run_seo_check(mode, cfg, topic, title, meta, tags, content):
         if mode == "쿠팡파트너스":
             checks.append(("파트너스 고지 문구", "ok" if DISCLOSURE_TEXT in content else "bad",
                             "포함" if DISCLOSURE_TEXT in content else "누락 — 자동 보정됨"))
+
+    slot_count = len(re.findall(r"\[이미지\d+\]", content))
+    checks.append((
+        "이미지 자리/프롬프트 매칭", "ok" if slot_count > 0 and slot_count == len(images) else "warn",
+        f"본문 자리 {slot_count}개 / 프롬프트 {len(images)}개",
+    ))
 
     return checks
 
@@ -449,15 +473,15 @@ with col_output:
 
             with st.spinner("SEO 구조에 맞춰 글을 작성하는 중…"):
                 try:
-                    title, meta, tags, content = generate_post(
+                    title, meta, tags, content, images = generate_post(
                         client, mode, topic.strip(), resolved_link1, resolved_link2,
                         tone_key, length_key, extra.strip(),
                     )
-                    checks = run_seo_check(mode, cfg, topic.strip(), title, meta, tags, content)
+                    checks = run_seo_check(mode, cfg, topic.strip(), title, meta, tags, content, images)
                     st.session_state["result"] = {
                         "title": title, "meta": meta, "tags": tags,
                         "content": content, "format": cfg["format"], "mode": mode,
-                        "checks": checks, "auto_used": auto_used,
+                        "checks": checks, "auto_used": auto_used, "images": images,
                     }
                 except Exception as e:
                     st.error(f"생성 중 오류가 발생했습니다: {e}")
@@ -496,5 +520,12 @@ with col_output:
         else:
             st.caption("네이버 블로그 에디터에 그대로 붙여넣을 수 있는 순수 텍스트입니다.")
             st.code(result["content"], language=None)
+
+        if result.get("images"):
+            st.subheader("🖼️ 이미지 생성 프롬프트")
+            st.caption("아래 프롬프트를 복사해서 Google Flow(또는 다른 이미지 생성 도구)에 붙여넣고, "
+                       "마음에 드는 이미지를 골라 본문의 같은 번호 [이미지N] 자리에 넣어주세요.")
+            for label, prompt in result["images"]:
+                st.code(f"[{label}] {prompt}", language=None)
     else:
         st.info("왼쪽에서 카테고리와 주제를 입력하고 생성 버튼을 누르면 결과가 여기에 표시됩니다.")
