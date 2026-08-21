@@ -1,5 +1,6 @@
 import os
 import re
+import requests
 import streamlit as st
 import streamlit.components.v1 as components
 import google.generativeai as genai
@@ -9,7 +10,6 @@ import google.generativeai as genai
 # ────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="포스트팩토리 — SEO 블로그 자동작성", page_icon="📝", layout="wide")
 
-# 공통으로 녹여 넣는 SEO 품질 규칙 (여러 카테고리 시스템 프롬프트에서 재사용)
 QUALITY_RULES = (
     "모바일 가독성을 위해 한 문장은 평균 40~50자 이내로 짧게 끊고, 2~4문장마다 문단을 나누세요. "
     "핵심 키워드는 제목/도입부/소제목 2곳 이상/마무리에 걸쳐 자연스럽게 5~7회 반복하되 "
@@ -20,50 +20,70 @@ QUALITY_RULES = (
     "독자를 오도할 수 있으므로, 대신 흔히 겪는 상황에 공감하는 화법으로 신뢰를 쌓으세요."
 )
 
+# 애드센스 광고 자동 삽입 위치 규칙 (html 카테고리 공통)
+AD_SLOT_RULES = (
+    "<!--AD_SLOT--> 마커를 정확히 3번, 다른 텍스트로 바꾸지 말고 그대로 출력하세요: "
+    "① 도입부 첫 CTA 버튼 바로 다음 ② 두 번째 jb-h2 섹션이 끝난 직후 ③ jb-qa(Q&A) 시작 바로 전."
+)
+
 MODE_CONFIG = {
     "지원금/제도": {
         "format": "html",
         "topic_label": "지원금/제도 이름",
         "topic_placeholder": "예: 청년월세지원",
-        "link_label": "공식 신청/참고 링크 (선택)",
+        "link_mode": "dual",
+        "link1_label": "버튼1 링크 · 신청하러 가기 (비우면 자동 검색)",
+        "link2_label": "버튼2 링크 · 자격 조회하기 (비우면 자동 검색)",
         "system": (
             "당신은 20년차 SEO 전문가이자 정부 지원금 정보 콘텐츠 작가입니다. "
             "독자는 해당 지원금 대상 여부가 궁금해서 검색해 들어온 사람입니다. "
             "손실 회피 문구로 도입부를 시작해 관심을 끌고, "
             "신청 방법 → 대상 조건 → 지급 금액/유효기간 → Q&A 순으로 구성하세요. "
             "실제 존재하는 제도라면 사실 관계를 왜곡하지 말고, "
-            "확실하지 않은 수치는 '지자체·연도별로 다를 수 있음'으로 처리하세요. " + QUALITY_RULES
+            "확실하지 않은 수치는 '지자체·연도별로 다를 수 있음'으로 처리하세요. "
+            "CTA 버튼은 정확히 2번 사용합니다: 첫 번째는 도입부 직후, 링크1로 '신청하러 가기👆' 텍스트. "
+            "두 번째는 Q&A 섹션 바로 다음, 링크2로 '자격 조회하기👆' 텍스트. "
+            + QUALITY_RULES + " " + AD_SLOT_RULES
         ),
     },
     "축제/행사": {
         "format": "html",
         "topic_label": "축제/행사 이름",
         "topic_placeholder": "예: 직지문화축제",
-        "link_label": "공식 홈페이지 링크 (선택)",
+        "link_mode": "single",
+        "link1_label": "공식 홈페이지 링크 (비우면 자동 검색)",
         "system": (
             "당신은 20년차 SEO 전문가이자 지역 축제 여행 콘텐츠 작가입니다. "
             "독자는 이 축제에 가볼지 결정하려는 사람입니다. "
-            "핵심 명소 → 기본 정보(기간/장소/교통/주차) → 방문 꿀팁 → 함께 즐기면 좋은 다른 행사 순으로, "
-            "현장감 있고 구체적인 문장으로 구성하세요. " + QUALITY_RULES
+            "'핵심 명소'와 '주요 프로그램'은 절대 긴 문단으로 나열하지 말고, "
+            "반드시 jb-spot-list 카드 목록(아이콘 + 짧은 이름 + 1~2문장 설명)으로 3~4개씩 작성하세요. "
+            "그 다음 기본 정보(기간/장소/교통/주차) → 방문 꿀팁 → 함께 즐기면 좋은 다른 행사 순으로 구성하세요. "
+            "CTA 버튼은 정확히 2번, 같은 링크로 '공식 홈페이지 바로가기👆' 텍스트를 사용하세요. "
+            + QUALITY_RULES + " " + AD_SLOT_RULES
         ),
     },
     "일반 블로그": {
         "format": "html",
         "topic_label": "주제/키워드",
         "topic_placeholder": "예: 겨울철 난방비 절약 방법",
-        "link_label": "참고 링크 (선택)",
+        "link_mode": "single",
+        "link1_label": "참고 링크 (선택)",
         "system": (
             "당신은 20년차 SEO 전문가이자 정보성 블로그 작가입니다. "
             "검색 의도에 정확히 부합하는 실용적인 정보를 다루세요. "
+            "핵심 항목이 여러 개 나열되는 부분(예: 방법 목록, 추천 목록)은 긴 문단 대신 "
+            "jb-spot-list 카드 목록으로 정리하면 가독성이 좋습니다(해당될 때만). "
             "왜 중요한지(도입) → 핵심 정보/방법을 섹션별로 → 실수하기 쉬운 점(팁 박스) → Q&A 순으로 구성하세요. "
-            + QUALITY_RULES
+            "CTA 버튼은 정확히 2번, 같은 링크로 '자세히 보기👆' 텍스트를 사용하세요. "
+            + QUALITY_RULES + " " + AD_SLOT_RULES
         ),
     },
     "쿠팡파트너스": {
         "format": "text",
         "topic_label": "상품/카테고리명",
         "topic_placeholder": "예: 무선 청소기 추천",
-        "link_label": "쿠팡 파트너스 링크",
+        "link_mode": "single",
+        "link1_label": "쿠팡 파트너스 링크",
         "system": (
             "당신은 20년차 SEO 전문가이자 쿠팡 파트너스 제휴 마케팅 콘텐츠 작가입니다. "
             "네이버 블로그에 그대로 붙여넣을 순수 텍스트(HTML 태그 없음)로 작성합니다. "
@@ -80,19 +100,21 @@ MODE_CONFIG = {
 SKIN_CLASSES_DOC = """
 사용 가능한 스킨 클래스 (이 클래스만 사용해서 HTML을 작성할 것. 새로운 class나 인라인 style은 만들지 말 것):
 - <div class="jb-post"> : 전체 글 감싸는 최외곽 wrapper (필수, 1개)
-- <div class="jb-hero"><span class="jb-hero-tag">태그</span><div class="jb-hero-title">제목</div><div class="jb-hero-perf"></div><div class="jb-hero-meta">부가정보 · 부가정보</div></div> : 글 맨 위 히어로 배너 (필수, 1개)
-- <div class="jb-cta-wrap"><a class="jb-cta" href="LINK">버튼 텍스트👆</a></div> : CTA 버튼 (중간과 마지막에 각 1회, 총 2회)
-- <div class="jb-h2">섹션 제목</div> : 섹션 제목, 어울리는 이모지 1개 포함. 3~4개 사용
-- <div class="jb-info"><div class="jb-info-row"><div class="jb-info-label">라벨</div><div class="jb-info-val">내용</div></div>...</div> : 기본정보 요약 카드 (선택)
+- <div class="jb-hero">...</div> : 글 맨 위 히어로 배너 (필수, 1개)
+- <div class="jb-cta-wrap"><a class="jb-cta" href="LINK">버튼 텍스트👆</a></div> : CTA 버튼
+- <div class="jb-h2">섹션 제목</div> : 섹션 제목, 이모지 1개 포함. 3~4개 사용
+- <div class="jb-info">...</div> : 기본정보 요약 카드 (jb-info-row/label/val 조합, 선택)
+- <div class="jb-spot-list"><div class="jb-spot-item"><div class="jb-spot-icon">이모지</div><div class="jb-spot-body"><div class="jb-spot-name">이름</div><div class="jb-spot-desc">1~2문장 설명</div></div></div>...</div>
+  : 명소/프로그램/추천항목 등 나열형 정보를 카드 리스트로 보여줄 때 사용 (3~4개 항목)
 - <div class="jb-tip"><b>라벨</b> 설명글</div> : 꿀팁/주의사항 박스 (2~3개)
-- <div class="jb-table-wrap"><table class="jb-table"><tr><th>..</th></tr><tr><td>..</td></tr></table></div> : 비교/조건표 (선택)
+- <div class="jb-table-wrap"><table class="jb-table">...</table></div> : 비교/조건표 (선택)
 - <div class="jb-qa"><div class="jb-qa-item"><div class="jb-qa-q">Q. 질문</div><div class="jb-qa-a">답변</div></div>...</div> : Q&A, 2~3문항
 - <div class="jb-divider">· · ·</div> : 섹션 구분선 (선택)
 - <span class="jb-highlight">강조 텍스트</span> : 본문 강조 inline span
 - 일반 문단은 <p>텍스트</p>
 
 작성 규칙:
-- 전체 응답은 900토큰 이내로 끝나야 하므로 섹션은 3~4개로 제한하고 간결하게 쓸 것 (반드시 ###END### 까지 도달)
+- 전체 응답은 1100토큰 이내로 끝나야 하므로 섹션은 3~4개로 제한하고 간결하게 쓸 것 (반드시 ###END### 까지 도달)
 - 모든 태그를 빠짐없이 닫을 것
 - 코드펜스나 설명 문구 없이, 지정된 마커 형식으로만 응답할 것
 """
@@ -128,6 +150,12 @@ SKIN_CSS = """
 .jb-info-row:last-child{border-bottom:none;}
 .jb-info-label{flex:0 0 88px;font-weight:700;color:#B5762F;}
 .jb-info-val{color:#3A3A3A;}
+.jb-spot-list{margin:14px 0 22px;}
+.jb-spot-item{display:flex;gap:13px;padding:14px 0;border-bottom:1px dashed #EADFC8;}
+.jb-spot-item:last-child{border-bottom:none;}
+.jb-spot-icon{font-size:23px;flex:0 0 30px;line-height:1.5;}
+.jb-spot-name{font-weight:800;color:#1B2A41;font-size:15px;margin-bottom:4px;}
+.jb-spot-desc{font-size:14px;color:#454545;line-height:1.7;}
 .jb-tip{background:#EAF7F3;border-left:4px solid #1F6F63;border-radius:0 10px 10px 0;padding:13px 16px;margin:12px 0;font-size:14.5px;color:#184E46;line-height:1.7;}
 .jb-tip b{color:#0F3A33;}
 .jb-table-wrap{overflow-x:auto;margin:16px 0 22px;border-radius:10px;border:1px solid #E7E1D6;}
@@ -140,6 +168,7 @@ SKIN_CSS = """
 .jb-qa-q{font-weight:800;color:#1B2A41;font-size:14.5px;margin-bottom:6px;}
 .jb-qa-a{font-size:14px;color:#454545;line-height:1.75;}
 .jb-divider{text-align:center;color:#C7BFAE;font-size:13px;margin:28px 0;letter-spacing:.4em;}
+.jb-ad-slot{margin:26px 0;text-align:center;}
 """
 
 TONE_OPTIONS = {
@@ -156,8 +185,6 @@ DISCLOSURE_TEXT = "본 포스팅은 쿠팡 파트너스 활동의 일환으로, 
 
 
 def get_client():
-    """Gemini는 무료 티어가 있는 Google AI Studio API 키를 사용합니다.
-    https://aistudio.google.com/app/apikey 에서 신용카드 없이 발급 가능."""
     api_key = st.secrets.get("GOOGLE_API_KEY", None) or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
         api_key = st.session_state.get("manual_api_key", "")
@@ -167,76 +194,23 @@ def get_client():
     return genai
 
 
-def count_keyword(text, keyword):
-    if not keyword or not text:
-        return 0
-    return text.lower().count(keyword.lower())
-
-
-def sentence_lengths(text):
-    plain = re.sub(r"<[^>]+>", " ", text)
-    sentences = re.split(r"[.!?\n]", plain)
-    return [len(s.strip()) for s in sentences if s.strip()]
-
-
-def run_seo_check(mode, cfg, topic, title, meta, tags, content):
-    """생성된 글이 프롬프트에 지시한 SEO 규칙을 실제로 지켰는지 기계적으로 검증합니다.
-    검색엔진 실제 순위(백링크·블로그 지수·E-E-A-T 등)를 보장하는 것은 아니며,
-    온페이지(제목/키워드/구조) 요소만 확인합니다."""
-    checks = []
-    plain_content = re.sub(r"<[^>]+>", " ", content) if cfg["format"] == "html" else content
-
-    kw_count = count_keyword(plain_content, topic) + count_keyword(title, topic)
-    status = "ok" if kw_count >= 5 else ("warn" if kw_count >= 3 else "bad")
-    checks.append(("키워드 반복 횟수", status, f"제목+본문에서 '{topic}' {kw_count}회 등장 (목표 5~7회)"))
-
-    tlen = len(title)
-    status = "ok" if tlen <= 32 else ("warn" if tlen <= 40 else "bad")
-    checks.append(("제목 길이", status, f"{tlen}자 (권장 32자 이내)"))
-
-    status = "ok" if topic.lower() in title.lower() else "bad"
-    checks.append(("제목에 키워드 포함", status, "포함" if status == "ok" else "미포함"))
-
-    mlen = len(meta)
-    status = "ok" if 40 <= mlen <= 100 else "warn"
-    checks.append(("메타설명 길이", status, f"{mlen}자 (권장 40~100자)"))
-
-    tag_list = [t.strip() for t in tags.split(",") if t.strip()]
-    tcount = len(tag_list)
-    status = "ok" if 5 <= tcount <= 8 else "warn"
-    checks.append(("태그 개수", status, f"{tcount}개 (권장 5~7개)"))
-
-    lens = sentence_lengths(plain_content)
-    if lens:
-        long_ratio = sum(1 for l in lens if l > 55) / len(lens)
-        status = "ok" if long_ratio < 0.25 else ("warn" if long_ratio < 0.5 else "bad")
-        checks.append(("모바일 문장 길이", status, f"55자 넘는 문장 비율 {long_ratio*100:.0f}% (낮을수록 좋음)"))
-
-    if cfg["format"] == "html":
-        h2count = len(re.findall(r'class="jb-h2"', content))
-        status = "ok" if 3 <= h2count <= 5 else "warn"
-        checks.append(("소제목(H2) 개수", status, f"{h2count}개 (권장 3~4개)"))
-
-        cta_count = len(re.findall(r'class="jb-cta"', content))
-        status = "ok" if cta_count >= 2 else "warn"
-        checks.append(("CTA 버튼 개수", status, f"{cta_count}회 (권장 2회)"))
-
-        qa_present = "jb-qa-item" in content
-        checks.append(("Q&A 섹션", "ok" if qa_present else "warn", "포함" if qa_present else "미포함"))
-    else:
-        link_count = content.count("→")
-        status = "ok" if link_count >= 2 else "warn"
-        checks.append(("링크 자리 표시", status, f"{link_count}회 (권장 2회: 서론/결론)"))
-
-        qmarks = content.count("?")
-        status = "ok" if qmarks >= 3 else "warn"
-        checks.append(("FAQ 질문 개수(추정)", status, f"물음표 {qmarks}개 감지"))
-
-        if mode == "쿠팡파트너스":
-            disc = DISCLOSURE_TEXT in content
-            checks.append(("파트너스 고지 문구", "ok" if disc else "bad", "포함" if disc else "누락"))
-
-    return checks
+def search_official_link(query):
+    """Google Programmable Search(Custom Search JSON API)로 공식 페이지를 자동 검색.
+    GOOGLE_CSE_KEY, GOOGLE_CSE_ID가 설정돼 있지 않으면 (None, 안내메시지)를 반환."""
+    cse_key = st.secrets.get("GOOGLE_CSE_KEY", None) or os.environ.get("GOOGLE_CSE_KEY")
+    cse_id = st.secrets.get("GOOGLE_CSE_ID", None) or os.environ.get("GOOGLE_CSE_ID")
+    if not cse_key or not cse_id:
+        return None, "미설정"
+    try:
+        resp = requests.get(
+            "https://www.googleapis.com/customsearch/v1",
+            params={"key": cse_key, "cx": cse_id, "q": f"{query} 공식 사이트", "num": 3},
+            timeout=8,
+        )
+        items = resp.json().get("items", [])
+        return (items[0]["link"], None) if items else (None, "검색 결과 없음")
+    except Exception as e:
+        return None, str(e)
 
 
 def extract_between(text, start_marker, end_marker):
@@ -248,16 +222,18 @@ def extract_between(text, start_marker, end_marker):
     return (text[frm:] if e == -1 else text[frm:e]).strip()
 
 
-def generate_post(client, mode, topic, link, tone_key, length_key, extra):
+def generate_post(client, mode, topic, link1, link2, tone_key, length_key, extra):
     cfg = MODE_CONFIG[mode]
     tone = TONE_OPTIONS[tone_key]
     length = LENGTH_OPTIONS[length_key]
     rules_doc = SKIN_CLASSES_DOC if cfg["format"] == "html" else TEXT_RULES_DOC
 
+    link_desc = f"링크1: {link1}" if cfg["link_mode"] == "single" else f"링크1(신청): {link1}\n링크2(자격조회): {link2}"
+
     user_prompt = f"""
 주제: {topic}
 카테고리: {mode}
-링크: {link}
+{link_desc}
 말투: {tone}
 분량: {length}
 추가 반영사항: {extra or '없음'}
@@ -280,14 +256,13 @@ def generate_post(client, mode, topic, link, tone_key, length_key, extra):
         model = client.GenerativeModel(model_name, system_instruction=cfg["system"])
         resp = model.generate_content(
             user_prompt,
-            generation_config=genai.types.GenerationConfig(max_output_tokens=1500, temperature=0.8),
+            generation_config=genai.types.GenerationConfig(max_output_tokens=1600, temperature=0.8),
         )
         return resp.text
 
     try:
         raw = call_model("gemini-flash-latest")
     except Exception:
-        # 최신 별칭이 막혀 있을 경우를 대비한 보조 모델
         raw = call_model("gemini-flash-lite-latest")
 
     title = extract_between(raw, "###TITLE###", "###META###")
@@ -298,11 +273,70 @@ def generate_post(client, mode, topic, link, tone_key, length_key, extra):
         content = raw.split("###CONTENT###")[-1]
     content = re.sub(r"```html|```", "", content).strip()
 
-    # 쿠팡 파트너스 고지 문구는 모델 출력에 의존하지 않고 항상 보장
     if mode == "쿠팡파트너스" and DISCLOSURE_TEXT not in content:
         content = DISCLOSURE_TEXT + "\n\n" + content
 
+    # 애드센스 광고 자동 삽입 (html 카테고리만 해당)
+    if cfg["format"] == "html":
+        ad_code = st.session_state.get("adsense_code", "").strip()
+        replacement = f'<div class="jb-ad-slot">{ad_code}</div>' if ad_code else ""
+        content = content.replace("<!--AD_SLOT-->", replacement)
+
     return title, meta, tags, content
+
+
+def run_seo_check(mode, cfg, topic, title, meta, tags, content):
+    checks = []
+    plain = re.sub(r"<[^>]+>", " ", content)
+
+    kw_count = plain.lower().count(topic.lower()) + title.lower().count(topic.lower())
+    checks.append((
+        "키워드 반복", "ok" if 5 <= kw_count <= 9 else ("warn" if kw_count > 0 else "bad"),
+        f"'{topic}' {kw_count}회 등장 (목표 5~7회)",
+    ))
+    checks.append((
+        "제목 길이/키워드", "ok" if len(title) <= 32 and topic.lower() in title.lower() else "warn",
+        f"{len(title)}자, 키워드 포함 {'✔' if topic.lower() in title.lower() else '✘'}",
+    ))
+    checks.append((
+        "메타설명 길이", "ok" if 40 <= len(meta) <= 100 else "warn",
+        f"{len(meta)}자 (목표 40~100자)",
+    ))
+    tag_count = len([t for t in tags.split(",") if t.strip()])
+    checks.append((
+        "태그 개수", "ok" if 5 <= tag_count <= 8 else "warn",
+        f"{tag_count}개 (목표 5~7개)",
+    ))
+
+    sentences = re.split(r"(?<=[.!?다요])\s+", plain)
+    long_ratio = sum(1 for s in sentences if len(s.strip()) > 55) / max(len(sentences), 1)
+    checks.append((
+        "모바일 문장 길이", "ok" if long_ratio < 0.25 else "warn",
+        f"55자 초과 문장 비율 {long_ratio:.0%}",
+    ))
+
+    if cfg["format"] == "html":
+        h2_count = content.count("jb-h2")
+        checks.append(("소제목 개수", "ok" if 3 <= h2_count <= 5 else "warn", f"jb-h2 {h2_count}개"))
+        cta_count = content.count("jb-cta\"")
+        checks.append(("CTA 버튼", "ok" if cta_count >= 2 else "warn", f"{cta_count}회 등장 (목표 2회)"))
+        checks.append(("Q&A 포함", "ok" if "jb-qa" in content else "warn", "포함" if "jb-qa" in content else "미포함"))
+        if mode == "축제/행사":
+            spot_count = content.count("jb-spot-item")
+            checks.append(("명소/프로그램 카드", "ok" if spot_count >= 3 else "warn", f"jb-spot-item {spot_count}개"))
+        ad_code = st.session_state.get("adsense_code", "").strip()
+        if ad_code:
+            ad_count = content.count("jb-ad-slot")
+            checks.append(("애드센스 삽입", "ok" if ad_count >= 2 else "warn", f"{ad_count}곳 삽입 (목표 3곳)"))
+    else:
+        link_count = content.count("→")
+        checks.append(("링크 자리 표시", "ok" if link_count >= 2 else "warn", f"{link_count}회 등장 (목표 2회)"))
+        checks.append(("FAQ 포함", "ok" if content.count("?") >= 3 else "warn", f"물음표 {content.count('?')}개"))
+        if mode == "쿠팡파트너스":
+            checks.append(("파트너스 고지 문구", "ok" if DISCLOSURE_TEXT in content else "bad",
+                            "포함" if DISCLOSURE_TEXT in content else "누락 — 자동 보정됨"))
+
+    return checks
 
 
 # ────────────────────────────────────────────────────────────────
@@ -323,7 +357,37 @@ if client is None:
     client = get_client()
 
 with st.sidebar:
-    st.caption("🆓 Gemini Flash 무료 티어 사용 중 (모델은 Google이 자동으로 최신 버전 유지) — 한도는 계정별로 다를 수 있으니 AI Studio에서 확인하세요")
+    st.caption("🆓 Gemini Flash 무료 티어 사용 중 (모델은 Google이 자동으로 최신 버전 유지)")
+    st.divider()
+
+    st.subheader("📢 애드센스 자동 삽입 (선택)")
+    default_ad = st.secrets.get("ADSENSE_CODE", "") if hasattr(st, "secrets") else ""
+    st.session_state["adsense_code"] = st.text_area(
+        "애드센스 광고 코드 (ins/script 태그 그대로 붙여넣기)",
+        value=st.session_state.get("adsense_code", default_ad),
+        height=100,
+        help="비워두면 광고 없이 생성됩니다. 티스토리(HTML) 카테고리에만 적용되며, "
+             "도입부 CTA 직후·본문 중간·Q&A 직전 3곳에 자동으로 들어갑니다.",
+    )
+    st.caption("⚠️ 미리보기 화면(iframe)에서는 실제 광고가 안 뜰 수 있어요 — 정상입니다. "
+               "실제 티스토리에 붙여넣으면 정상 노출됩니다.")
+
+    st.divider()
+    st.subheader("🔎 공식 링크 자동 검색 (선택)")
+    cse_ready = bool(
+        (st.secrets.get("GOOGLE_CSE_KEY", None) or os.environ.get("GOOGLE_CSE_KEY"))
+        and (st.secrets.get("GOOGLE_CSE_ID", None) or os.environ.get("GOOGLE_CSE_ID"))
+    )
+    if cse_ready:
+        st.success("자동 검색 사용 가능 — 링크를 비워두면 자동으로 채워집니다.")
+    else:
+        st.caption(
+            "링크 입력칸을 비워도 자동으로 채우려면 Google Custom Search를 등록하세요:\n\n"
+            "1. programmablesearchengine.google.com 에서 검색엔진 생성 (전체 웹 검색으로 설정) → 검색엔진 ID 확인\n"
+            "2. console.cloud.google.com 에서 'Custom Search API' 활성화 후 API 키 발급 (무료, 하루 100건)\n"
+            "3. Streamlit Secrets에 GOOGLE_CSE_ID, GOOGLE_CSE_KEY 등록"
+        )
+
     st.divider()
     st.subheader("📦 공용 스킨 CSS (티스토리 전용)")
     st.caption("지원금·축제·일반 블로그(HTML) 글에만 적용됩니다. 티스토리 관리자 → 꾸미기 → 스킨 편집 → CSS 탭 맨 아래에 한 번만 붙여넣으세요.")
@@ -338,9 +402,15 @@ with col_input:
     cfg = MODE_CONFIG[mode]
 
     topic = st.text_input(cfg["topic_label"], placeholder=cfg["topic_placeholder"])
-    link = st.text_input(cfg["link_label"], placeholder="https://...")
-    if mode == "쿠팡파트너스":
-        st.caption("⚠️ 쿠팡 파트너스 이용약관상 링크는 실제 발급받은 파트너스 링크만 사용해야 합니다.")
+
+    if cfg["link_mode"] == "dual":
+        link1_in = st.text_input(cfg["link1_label"], placeholder="https://... (비우면 자동 검색)")
+        link2_in = st.text_input(cfg["link2_label"], placeholder="https://... (비우면 자동 검색)")
+    else:
+        link1_in = st.text_input(cfg["link1_label"], placeholder="https://...")
+        link2_in = link1_in
+        if mode == "쿠팡파트너스":
+            st.caption("⚠️ 쿠팡 파트너스 이용약관상 링크는 실제 발급받은 파트너스 링크만 사용해야 합니다.")
 
     c1, c2 = st.columns(2)
     with c1:
@@ -357,33 +427,57 @@ with col_output:
         elif client is None:
             st.error("Google API 키가 필요합니다. 왼쪽 사이드바에서 입력하거나 Secrets에 등록하세요.")
         else:
+            resolved_link1, resolved_link2 = link1_in.strip(), link2_in.strip()
+            auto_used = []
+            if cfg["format"] == "html":
+                if not resolved_link1:
+                    found, err = search_official_link(topic.strip())
+                    if found:
+                        resolved_link1 = found
+                        auto_used.append(("링크1", found))
+                    else:
+                        resolved_link1 = "[링크 입력]"
+                if cfg["link_mode"] == "dual" and not resolved_link2:
+                    found, err = search_official_link(topic.strip())
+                    if found:
+                        resolved_link2 = found
+                        auto_used.append(("링크2", found))
+                    else:
+                        resolved_link2 = "[링크 입력]"
+            resolved_link1 = resolved_link1 or "[링크 입력]"
+            resolved_link2 = resolved_link2 or resolved_link1
+
             with st.spinner("SEO 구조에 맞춰 글을 작성하는 중…"):
                 try:
                     title, meta, tags, content = generate_post(
-                        client, mode, topic.strip(), link.strip() or "[링크 입력]",
+                        client, mode, topic.strip(), resolved_link1, resolved_link2,
                         tone_key, length_key, extra.strip(),
                     )
                     checks = run_seo_check(mode, cfg, topic.strip(), title, meta, tags, content)
                     st.session_state["result"] = {
                         "title": title, "meta": meta, "tags": tags,
                         "content": content, "format": cfg["format"], "mode": mode,
-                        "checks": checks,
+                        "checks": checks, "auto_used": auto_used,
                     }
                 except Exception as e:
                     st.error(f"생성 중 오류가 발생했습니다: {e}")
 
     result = st.session_state.get("result")
     if result:
+        if result.get("auto_used"):
+            for label, url in result["auto_used"]:
+                st.info(f"🔎 {label}를 자동 검색으로 채웠습니다: {url} (필요하면 직접 수정하세요)")
+
         st.markdown(f"**[{result['mode']}] 제목** {result['title']}")
         st.markdown(f"**메타설명** {result['meta']}")
-        tag_chips = " ".join(f"`#{t.strip()}`" for t in result["tags"].split(",") if t.strip())
-        st.markdown(f"**태그** {tag_chips}")
 
         ICONS = {"ok": "✅", "warn": "⚠️", "bad": "❌"}
         checks = result.get("checks", [])
         bad_count = sum(1 for _, s, _ in checks if s == "bad")
         warn_count = sum(1 for _, s, _ in checks if s == "warn")
         summary = "모든 항목 통과" if not bad_count and not warn_count else f"주의 {warn_count}건 · 문제 {bad_count}건"
+        tag_chips = " ".join(f"`#{t.strip()}`" for t in result["tags"].split(",") if t.strip())
+        st.markdown(f"**태그** {tag_chips}")
         with st.expander(f"🔍 SEO 체크리스트 — {summary}", expanded=bool(bad_count)):
             st.caption("이 글이 프롬프트 규칙(키워드 배치·구조·문장 길이 등)을 실제로 지켰는지 기계적으로 확인한 결과입니다. "
                        "백링크·블로그 지수·클릭률 같은 검색엔진의 실제 순위 요인은 발행 후에나 확인할 수 있어 여기 포함되지 않습니다.")
@@ -395,7 +489,7 @@ with col_output:
             with tab_preview:
                 components.html(
                     f"<style>{SKIN_CSS}</style>{result['content']}",
-                    height=900, scrolling=True,
+                    height=1000, scrolling=True,
                 )
             with tab_code:
                 st.code(result["content"], language="html")
