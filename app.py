@@ -167,6 +167,78 @@ def get_client():
     return genai
 
 
+def count_keyword(text, keyword):
+    if not keyword or not text:
+        return 0
+    return text.lower().count(keyword.lower())
+
+
+def sentence_lengths(text):
+    plain = re.sub(r"<[^>]+>", " ", text)
+    sentences = re.split(r"[.!?\n]", plain)
+    return [len(s.strip()) for s in sentences if s.strip()]
+
+
+def run_seo_check(mode, cfg, topic, title, meta, tags, content):
+    """생성된 글이 프롬프트에 지시한 SEO 규칙을 실제로 지켰는지 기계적으로 검증합니다.
+    검색엔진 실제 순위(백링크·블로그 지수·E-E-A-T 등)를 보장하는 것은 아니며,
+    온페이지(제목/키워드/구조) 요소만 확인합니다."""
+    checks = []
+    plain_content = re.sub(r"<[^>]+>", " ", content) if cfg["format"] == "html" else content
+
+    kw_count = count_keyword(plain_content, topic) + count_keyword(title, topic)
+    status = "ok" if kw_count >= 5 else ("warn" if kw_count >= 3 else "bad")
+    checks.append(("키워드 반복 횟수", status, f"제목+본문에서 '{topic}' {kw_count}회 등장 (목표 5~7회)"))
+
+    tlen = len(title)
+    status = "ok" if tlen <= 32 else ("warn" if tlen <= 40 else "bad")
+    checks.append(("제목 길이", status, f"{tlen}자 (권장 32자 이내)"))
+
+    status = "ok" if topic.lower() in title.lower() else "bad"
+    checks.append(("제목에 키워드 포함", status, "포함" if status == "ok" else "미포함"))
+
+    mlen = len(meta)
+    status = "ok" if 40 <= mlen <= 100 else "warn"
+    checks.append(("메타설명 길이", status, f"{mlen}자 (권장 40~100자)"))
+
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+    tcount = len(tag_list)
+    status = "ok" if 5 <= tcount <= 8 else "warn"
+    checks.append(("태그 개수", status, f"{tcount}개 (권장 5~7개)"))
+
+    lens = sentence_lengths(plain_content)
+    if lens:
+        long_ratio = sum(1 for l in lens if l > 55) / len(lens)
+        status = "ok" if long_ratio < 0.25 else ("warn" if long_ratio < 0.5 else "bad")
+        checks.append(("모바일 문장 길이", status, f"55자 넘는 문장 비율 {long_ratio*100:.0f}% (낮을수록 좋음)"))
+
+    if cfg["format"] == "html":
+        h2count = len(re.findall(r'class="jb-h2"', content))
+        status = "ok" if 3 <= h2count <= 5 else "warn"
+        checks.append(("소제목(H2) 개수", status, f"{h2count}개 (권장 3~4개)"))
+
+        cta_count = len(re.findall(r'class="jb-cta"', content))
+        status = "ok" if cta_count >= 2 else "warn"
+        checks.append(("CTA 버튼 개수", status, f"{cta_count}회 (권장 2회)"))
+
+        qa_present = "jb-qa-item" in content
+        checks.append(("Q&A 섹션", "ok" if qa_present else "warn", "포함" if qa_present else "미포함"))
+    else:
+        link_count = content.count("→")
+        status = "ok" if link_count >= 2 else "warn"
+        checks.append(("링크 자리 표시", status, f"{link_count}회 (권장 2회: 서론/결론)"))
+
+        qmarks = content.count("?")
+        status = "ok" if qmarks >= 3 else "warn"
+        checks.append(("FAQ 질문 개수(추정)", status, f"물음표 {qmarks}개 감지"))
+
+        if mode == "쿠팡파트너스":
+            disc = DISCLOSURE_TEXT in content
+            checks.append(("파트너스 고지 문구", "ok" if disc else "bad", "포함" if disc else "누락"))
+
+    return checks
+
+
 def extract_between(text, start_marker, end_marker):
     s = text.find(start_marker)
     if s == -1:
@@ -291,9 +363,11 @@ with col_output:
                         client, mode, topic.strip(), link.strip() or "[링크 입력]",
                         tone_key, length_key, extra.strip(),
                     )
+                    checks = run_seo_check(mode, cfg, topic.strip(), title, meta, tags, content)
                     st.session_state["result"] = {
                         "title": title, "meta": meta, "tags": tags,
                         "content": content, "format": cfg["format"], "mode": mode,
+                        "checks": checks,
                     }
                 except Exception as e:
                     st.error(f"생성 중 오류가 발생했습니다: {e}")
@@ -304,6 +378,17 @@ with col_output:
         st.markdown(f"**메타설명** {result['meta']}")
         tag_chips = " ".join(f"`#{t.strip()}`" for t in result["tags"].split(",") if t.strip())
         st.markdown(f"**태그** {tag_chips}")
+
+        ICONS = {"ok": "✅", "warn": "⚠️", "bad": "❌"}
+        checks = result.get("checks", [])
+        bad_count = sum(1 for _, s, _ in checks if s == "bad")
+        warn_count = sum(1 for _, s, _ in checks if s == "warn")
+        summary = "모든 항목 통과" if not bad_count and not warn_count else f"주의 {warn_count}건 · 문제 {bad_count}건"
+        with st.expander(f"🔍 SEO 체크리스트 — {summary}", expanded=bool(bad_count)):
+            st.caption("이 글이 프롬프트 규칙(키워드 배치·구조·문장 길이 등)을 실제로 지켰는지 기계적으로 확인한 결과입니다. "
+                       "백링크·블로그 지수·클릭률 같은 검색엔진의 실제 순위 요인은 발행 후에나 확인할 수 있어 여기 포함되지 않습니다.")
+            for label, status, detail in checks:
+                st.markdown(f"{ICONS.get(status, '•')} **{label}** — {detail}")
 
         if result["format"] == "html":
             tab_preview, tab_code = st.tabs(["미리보기", "HTML 코드"])
