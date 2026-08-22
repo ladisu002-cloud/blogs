@@ -4,6 +4,7 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 import google.generativeai as genai
+from bs4 import BeautifulSoup
 
 # ────────────────────────────────────────────────────────────────
 # 설정
@@ -28,11 +29,13 @@ AD_SLOT_RULES = (
 
 # 이미지 생성 프롬프트 규칙 (모든 카테고리 공통 — 실제 이미지는 생성하지 않고, 자리 표시 + 영어 프롬프트만 제공)
 IMAGE_PROMPT_RULES = (
-    "이미지는 2~4개면 충분합니다. 이미지가 들어가면 좋을 자리마다 본문에 [이미지1], [이미지2]처럼 "
-    "번호가 매겨진 자리 표시를 넣고, 그 번호와 정확히 일치하는 영어 이미지 생성 프롬프트를 "
-    "본문과 별도로 ###IMAGES### 섹션에 한 줄씩 작성하세요 (예: [이미지1] A cozy realistic photo of ...). "
+    "소제목(섹션) 하나당 이미지 1개씩, 보통 4~6개 정도가 적당합니다. 이미지가 들어가면 좋을 자리마다 "
+    "본문에 [이미지1], [이미지2]처럼 번호가 매겨진 자리 표시를 넣고, 그 번호와 정확히 일치하는 영어 이미지 생성 "
+    "프롬프트를 본문과 별도로 ###IMAGES### 섹션에 한 줄씩 작성하세요 (예: [이미지1] A cozy realistic photo of ...). "
     "프롬프트는 사실적인 사진 스타일로 피사체·구도·조명·분위기를 구체적으로 묘사하세요."
 )
+
+# 건강정보 등 링크가 없을 수도 있는 카테고리를 위한 동적 CTA 안내는 generate_post에서 상황에 따라 주입한다.
 
 MODE_CONFIG = {
     "지원금/제도": {
@@ -101,6 +104,26 @@ MODE_CONFIG = {
             "장점만 나열하지 말고 단점이나 이런 분께는 안 맞을 수 있다는 점도 최소 1곳 솔직하게 언급하세요. "
             "글 맨 앞에는 반드시 '본 포스팅은 쿠팡 파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 "
             "제공받습니다.'라는 문구를 그대로 포함하세요. " + QUALITY_RULES + " " + IMAGE_PROMPT_RULES
+        ),
+    },
+    "건강정보": {
+        "format": "html",
+        "topic_label": "건강 주제/키워드",
+        "topic_placeholder": "예: 혈압 낮추는 법",
+        "link_mode": "single",
+        "link1_label": "참고 링크 (선택 — 없으면 CTA 버튼 없이 작성)",
+        "system": (
+            "당신은 20년차 SEO 전문가이자 건강 정보 콘텐츠 작가입니다. "
+            "독자는 실생활에서 바로 실천할 수 있는 건강 관리법이 궁금해서 검색해 들어온 사람입니다. "
+            "흔한 오해나 궁금증으로 도입부를 시작하고, 원인/배경 → 실천 방법(단계별 또는 리스트, "
+            "jb-spot-list 카드 활용 가능) → 주의사항 → Q&A 순으로 구성하세요. "
+            "특정 의약품명이나 복용량, 개별 진단/치료를 지시하는 문장은 절대 쓰지 마세요. "
+            "운동·식습관·수면 같은 일반적인 생활습관 정보만 다루고, '~에 도움이 된다고 알려져 있습니다', "
+            "'전문가들은 ~을 권장합니다'처럼 출처를 특정하지 않는 일반론으로 서술하세요. "
+            "실존 여부가 불확실한 특정 연구·논문·저널명을 지어내 인용하지 마세요. "
+            "글 맨 끝에는 반드시 '이 글은 일반적인 건강 정보 제공을 목적으로 하며, 개인의 의학적 진단이나 "
+            "치료를 대체하지 않습니다. 증상이 있다면 반드시 전문의와 상담하세요.'라는 문구를 그대로 포함하세요. "
+            + QUALITY_RULES + " " + AD_SLOT_RULES + " " + IMAGE_PROMPT_RULES
         ),
     },
 }
@@ -194,6 +217,7 @@ LENGTH_OPTIONS = {
 }
 
 DISCLOSURE_TEXT = "본 포스팅은 쿠팡 파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받습니다."
+HEALTH_DISCLAIMER = "이 글은 일반적인 건강 정보 제공을 목적으로 하며, 개인의 의학적 진단이나 치료를 대체하지 않습니다. 증상이 있다면 반드시 전문의와 상담하세요."
 
 
 def get_client():
@@ -241,11 +265,18 @@ def generate_post(client, mode, topic, link1, link2, tone_key, length_key, extra
     rules_doc = SKIN_CLASSES_DOC if cfg["format"] == "html" else TEXT_RULES_DOC
 
     link_desc = f"링크1: {link1}" if cfg["link_mode"] == "single" else f"링크1(신청): {link1}\n링크2(자격조회): {link2}"
+    has_real_link = link1 != "[링크 입력]"
+    cta_note = (
+        "링크가 준비되어 있으니 시스템 지침대로 CTA 버튼을 사용하세요."
+        if has_real_link else
+        "이번 글에는 실제 링크가 없으므로 jb-cta-wrap/jb-cta 버튼을 아예 넣지 마세요."
+    )
 
     user_prompt = f"""
 주제: {topic}
 카테고리: {mode}
 {link_desc}
+CTA 안내: {cta_note}
 말투: {tone}
 분량: {length}
 추가 반영사항: {extra or '없음'}
@@ -314,14 +345,26 @@ def generate_post(client, mode, topic, link1, link2, tone_key, length_key, extra
 
     if mode == "쿠팡파트너스" and DISCLOSURE_TEXT not in content:
         content = DISCLOSURE_TEXT + "\n\n" + content
+    if mode == "건강정보" and HEALTH_DISCLAIMER not in content:
+        content += f'<div class="jb-tip"><b>안내</b> {HEALTH_DISCLAIMER}</div>'
 
     # 애드센스 광고 자동 삽입 (html 카테고리만 해당)
+    html_repaired = False
     if cfg["format"] == "html":
         ad_code = st.session_state.get("adsense_code", "").strip()
         replacement = f'<div class="jb-ad-slot">{ad_code}</div>' if ad_code else ""
         content = content.replace("<!--AD_SLOT-->", replacement)
 
-    return title, meta, tags, content, images
+        # 태그 균형 자동 보정: 모델이 가끔 div를 안 닫아서, Tistory가 이걸 다시 파싱할 때
+        # 이후 내용(이미지 자리 포함)이 엉뚱한 위치로 밀려나는 문제를 방지한다.
+        pre_open, pre_close = content.count("<div"), content.count("</div>")
+        html_repaired = pre_open != pre_close
+        try:
+            content = str(BeautifulSoup(content, "html.parser"))
+        except Exception:
+            pass
+
+    return title, meta, tags, content, images, html_repaired
 
 
 def run_seo_check(mode, cfg, topic, title, meta, tags, content, images):
@@ -374,6 +417,9 @@ def run_seo_check(mode, cfg, topic, title, meta, tags, content, images):
         if mode == "쿠팡파트너스":
             checks.append(("파트너스 고지 문구", "ok" if DISCLOSURE_TEXT in content else "bad",
                             "포함" if DISCLOSURE_TEXT in content else "누락 — 자동 보정됨"))
+        if mode == "건강정보":
+            checks.append(("건강정보 고지 문구", "ok" if HEALTH_DISCLAIMER in content else "bad",
+                            "포함" if HEALTH_DISCLAIMER in content else "누락 — 자동 보정됨"))
 
     slot_count = len(re.findall(r"\[이미지\d+\]", content))
     checks.append((
@@ -394,7 +440,7 @@ def run_seo_check(mode, cfg, topic, title, meta, tags, content, images):
 # UI
 # ────────────────────────────────────────────────────────────────
 st.title("📝 포스트팩토리 — SEO 블로그 자동작성")
-st.caption("지원금 · 축제 · 일반 블로그(티스토리 HTML) + 쿠팡파트너스(네이버 텍스트)를 자동 생성합니다")
+st.caption("지원금 · 축제 · 일반 · 건강정보(티스토리 HTML) + 쿠팡파트너스(네이버 텍스트)를 자동 생성합니다")
 
 client = get_client()
 if client is None:
@@ -500,7 +546,7 @@ with col_output:
 
             with st.spinner("SEO 구조에 맞춰 글을 작성하는 중…"):
                 try:
-                    title, meta, tags, content, images = generate_post(
+                    title, meta, tags, content, images, html_repaired = generate_post(
                         client, mode, topic.strip(), resolved_link1, resolved_link2,
                         tone_key, length_key, extra.strip(),
                     )
@@ -509,6 +555,7 @@ with col_output:
                         "title": title, "meta": meta, "tags": tags,
                         "content": content, "format": cfg["format"], "mode": mode,
                         "checks": checks, "auto_used": auto_used, "images": images,
+                        "html_repaired": html_repaired,
                     }
                 except Exception as e:
                     st.error(f"생성 중 오류가 발생했습니다: {e}")
@@ -518,6 +565,9 @@ with col_output:
         if result.get("auto_used"):
             for label, url in result["auto_used"]:
                 st.info(f"🔎 {label}를 자동 검색으로 채웠습니다: {url} (필요하면 직접 수정하세요)")
+        if result.get("html_repaired"):
+            st.warning("⚠️ 원본 HTML에서 태그가 안 닫힌 부분이 감지되어 자동으로 정리했습니다. "
+                       "이미지 자리나 구조가 이상해 보이면 다시 생성해보세요.")
 
         st.markdown(f"**[{result['mode']}] 제목** {result['title']}")
         st.markdown(f"**메타설명** {result['meta']}")
