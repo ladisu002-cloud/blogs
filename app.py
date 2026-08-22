@@ -267,6 +267,51 @@ def search_official_link(query):
         return None, str(e)
 
 
+def research_topic(topic, max_results=5):
+    """Google Custom Search로 주제 관련 자료를 실제 검색해서 (제목/스니펫/출처링크) 리스트로 반환.
+    이 결과가 writer 단계의 '리서치 자료'가 되어, 확인 안 된 내용을 지어내지 않도록 근거를 제공한다.
+    GOOGLE_CSE_KEY/GOOGLE_CSE_ID가 없으면 (None, '미설정')을 반환."""
+    cse_key = st.secrets.get("GOOGLE_CSE_KEY", None) or os.environ.get("GOOGLE_CSE_KEY")
+    cse_id = st.secrets.get("GOOGLE_CSE_ID", None) or os.environ.get("GOOGLE_CSE_ID")
+    if not cse_key or not cse_id:
+        return None, "미설정"
+    try:
+        resp = requests.get(
+            "https://www.googleapis.com/customsearch/v1",
+            params={"key": cse_key, "cx": cse_id, "q": topic, "num": max_results},
+            timeout=8,
+        )
+        items = resp.json().get("items", [])
+        results = [
+            {"title": it.get("title", ""), "snippet": it.get("snippet", ""), "link": it.get("link", "")}
+            for it in items
+        ]
+        return (results, None) if results else (None, "검색 결과 없음")
+    except Exception as e:
+        return None, str(e)
+
+
+def research_seo_rules(platform_hint):
+    """네이버/티스토리 등 플랫폼의 최신 상위노출 규칙을 웹에서 검색해서 근거자료로 반환.
+    검색 규칙은 계속 바뀌므로, 이 함수로 그때그때 다시 검색해 반영할 수 있다."""
+    query = f"{platform_hint} 블로그 상위노출 SEO 규칙 최신"
+    return research_topic(query, max_results=5)
+
+
+def format_research_block(results):
+    """research_topic() 결과를 writer 프롬프트에 그대로 넣을 수 있는 텍스트 블록으로 변환."""
+    if not results:
+        return ""
+    lines = [
+        "다음은 이 주제에 대해 웹에서 실제로 찾은 참고 자료입니다. "
+        "이 자료의 사실 관계를 우선순위로 삼아 작성하고, 여기 없는 내용을 사실처럼 지어내지 마세요. "
+        "수치나 날짜, 조건처럼 틀리면 안 되는 정보는 반드시 이 자료 범위 안에서만 사용하세요:",
+    ]
+    for i, r in enumerate(results, 1):
+        lines.append(f"{i}. {r['title']} — {r['snippet']} (출처: {r['link']})")
+    return "\n".join(lines)
+
+
 def extract_between(text, start_marker, end_marker):
     s = text.find(start_marker)
     if s == -1:
@@ -276,7 +321,7 @@ def extract_between(text, start_marker, end_marker):
     return (text[frm:] if e == -1 else text[frm:e]).strip()
 
 
-def generate_post(client, mode, topic, link1, link2, tone_key, length_key, extra):
+def generate_post(client, mode, topic, link1, link2, tone_key, length_key, extra, research_block="", seo_notes=""):
     cfg = MODE_CONFIG[mode]
     tone = TONE_OPTIONS[tone_key]
     length = LENGTH_OPTIONS[length_key]
@@ -298,6 +343,8 @@ CTA 안내: {cta_note}
 말투: {tone}
 분량: {length}
 추가 반영사항: {extra or '없음'}
+{f"추가 SEO 규칙 메모(최신 검색 기반, 반드시 반영): {seo_notes}" if seo_notes.strip() else ""}
+{research_block}
 
 {rules_doc}
 
@@ -504,6 +551,27 @@ with st.sidebar:
         )
 
     st.divider()
+    st.subheader("📈 검색 규칙(SEO) 새로고침 (선택)")
+    st.caption("네이버·티스토리 상위노출 규칙은 계속 바뀌므로, 필요할 때 웹에서 다시 검색해 아래 노트에 반영하세요. "
+               "저장한 노트는 앞으로 생성되는 모든 글의 시스템 규칙에 자동으로 추가됩니다.")
+    platform_hint = st.selectbox("검색 대상 플랫폼", ["네이버", "티스토리"], key="seo_refresh_platform")
+    if st.button("🔎 최신 SEO 규칙 검색", disabled=not cse_ready):
+        results, err = research_seo_rules(platform_hint)
+        st.session_state["seo_refresh_results"] = results or []
+        if err and not results:
+            st.warning(f"검색 실패: {err}")
+    if not cse_ready:
+        st.caption("⚠️ 이 기능도 위의 Google Custom Search 등록이 필요합니다.")
+    for r in st.session_state.get("seo_refresh_results", []):
+        st.markdown(f"- [{r['title']}]({r['link']}) — {r['snippet']}")
+    st.session_state["seo_extra_notes"] = st.text_area(
+        "검색 규칙 메모 (여기에 정리해서 적으면 생성 시 자동 반영)",
+        value=st.session_state.get("seo_extra_notes", ""),
+        height=100,
+        placeholder="예: 2026년부터 제목은 28자 이내 권장, 본문 도입부에 핵심 요약 3줄 필수 등",
+    )
+
+    st.divider()
     st.subheader("📦 공용 스킨 CSS (티스토리 전용)")
     st.caption("지원금·축제·일반 블로그(HTML) 글에만 적용됩니다. 티스토리 관리자 → 꾸미기 → 스킨 편집 → CSS 탭 맨 아래에 한 번만 붙여넣으세요.")
     st.code(SKIN_CSS.strip(), language="css")
@@ -533,6 +601,16 @@ with col_input:
     with c2:
         length_key = st.selectbox("분량", list(LENGTH_OPTIONS.keys()), index=1)
     extra = st.text_area("추가 반영사항 (선택)", placeholder="예: 청주 지역 특화, 2026년 기준 등")
+
+    use_research = st.checkbox(
+        "🔎 웹 리서치 사용 (출처 기반으로 작성)", value=cse_ready,
+        help="Google Custom Search로 주제를 실제 검색해서 그 결과를 근거로 글을 씁니다. "
+             "미설정 상태면 검색 없이 모델 자체 지식으로만 작성됩니다.",
+        disabled=not cse_ready,
+    )
+    if not cse_ready:
+        st.caption("⚠️ 리서치를 쓰려면 왼쪽 사이드바 안내대로 GOOGLE_CSE_KEY/GOOGLE_CSE_ID를 등록하세요.")
+
     generate = st.button("✨ 블로그 글 생성하기", type="primary", use_container_width=True)
 
 with col_output:
@@ -562,18 +640,29 @@ with col_output:
             resolved_link1 = resolved_link1 or "[링크 입력]"
             resolved_link2 = resolved_link2 or resolved_link1
 
+            research_block, research_sources = "", []
+            if use_research and cse_ready:
+                with st.spinner("주제를 웹에서 리서치하는 중…"):
+                    results, err = research_topic(topic.strip())
+                    if results:
+                        research_block = format_research_block(results)
+                        research_sources = results
+                    elif err not in ("검색 결과 없음",):
+                        st.warning(f"리서치 검색에 실패해서 리서치 없이 진행합니다: {err}")
+
             with st.spinner("SEO 구조에 맞춰 글을 작성하는 중…"):
                 try:
                     title, meta, tags, content, images, html_repaired = generate_post(
                         client, mode, topic.strip(), resolved_link1, resolved_link2,
-                        tone_key, length_key, extra.strip(),
+                        tone_key, length_key, extra.strip(), research_block,
+                        st.session_state.get("seo_extra_notes", ""),
                     )
                     checks = run_seo_check(mode, cfg, topic.strip(), title, meta, tags, content, images)
                     st.session_state["result"] = {
                         "title": title, "meta": meta, "tags": tags,
                         "content": content, "format": cfg["format"], "mode": mode,
                         "checks": checks, "auto_used": auto_used, "images": images,
-                        "html_repaired": html_repaired,
+                        "html_repaired": html_repaired, "research_sources": research_sources,
                     }
                 except Exception as e:
                     st.error(f"생성 중 오류가 발생했습니다: {e}")
@@ -586,6 +675,10 @@ with col_output:
         if result.get("html_repaired"):
             st.warning("⚠️ 원본 HTML에서 태그가 안 닫힌 부분이 감지되어 자동으로 정리했습니다. "
                        "이미지 자리나 구조가 이상해 보이면 다시 생성해보세요.")
+        if result.get("research_sources"):
+            with st.expander(f"🔎 리서치 출처 {len(result['research_sources'])}건 (이 자료를 근거로 작성됨)"):
+                for r in result["research_sources"]:
+                    st.markdown(f"- [{r['title']}]({r['link']}) — {r['snippet']}")
 
         st.markdown(f"**[{result['mode']}] 제목** {result['title']}")
         st.markdown(f"**메타설명** {result['meta']}")
@@ -624,3 +717,110 @@ with col_output:
                 st.code(f"[{label}] {prompt}", language=None)
     else:
         st.info("왼쪽에서 카테고리와 주제를 입력하고 생성 버튼을 누르면 결과가 여기에 표시됩니다.")
+
+
+# ────────────────────────────────────────────────────────────────
+# 배치 생성 (주제 여러 개를 한 번에 큐로 넣어 순차 생성)
+# ────────────────────────────────────────────────────────────────
+st.divider()
+with st.expander("📅 여러 주제 한 번에 생성 (배치 — 30일치/1주일치 등)"):
+    st.caption(
+        "왼쪽에서 선택한 카테고리·말투·분량·리서치 설정을 그대로 사용해서, "
+        "아래 주제들을 한 줄에 하나씩 순서대로 생성합니다. "
+        "지원금/축제처럼 항목별 링크가 다른 카테고리는 링크를 자동 검색으로 채우거나 "
+        "생성 후 결과에서 직접 수정하는 걸 권장해요."
+    )
+    batch_topics_raw = st.text_area(
+        "주제 목록 (한 줄에 하나씩, 최대 30개)",
+        height=180,
+        placeholder="예)\n혈압 낮추는 법\n겨울철 난방비 절약 방법\n무선 청소기 추천\n...",
+        key="batch_topics_raw",
+    )
+    run_batch = st.button("🚀 전체 순차 생성", key="run_batch_button")
+
+    if run_batch:
+        topics = [t.strip() for t in batch_topics_raw.splitlines() if t.strip()][:30]
+        if not topics:
+            st.error("주제를 한 줄에 하나씩 입력해 주세요.")
+        elif client is None:
+            st.error("Google API 키가 필요합니다.")
+        else:
+            batch_results = []
+            progress = st.progress(0.0, text="시작합니다…")
+            for i, t in enumerate(topics):
+                progress.progress((i) / len(topics), text=f"({i+1}/{len(topics)}) {t} 생성 중…")
+                try:
+                    b_link1 = link1_in.strip()
+                    b_link2 = link2_in.strip() if cfg["link_mode"] == "dual" else b_link1
+                    if cfg["format"] == "html":
+                        if not b_link1:
+                            found, _ = search_official_link(t)
+                            b_link1 = found or "[링크 입력]"
+                        if cfg["link_mode"] == "dual" and not b_link2:
+                            found, _ = search_official_link(t)
+                            b_link2 = found or "[링크 입력]"
+                    b_link1 = b_link1 or "[링크 입력]"
+                    b_link2 = b_link2 or b_link1
+
+                    b_research_block = ""
+                    b_sources = []
+                    if use_research and cse_ready:
+                        results, _ = research_topic(t)
+                        if results:
+                            b_research_block = format_research_block(results)
+                            b_sources = results
+
+                    title, meta, tags, content, images, html_repaired = generate_post(
+                        client, mode, t, b_link1, b_link2, tone_key, length_key, extra.strip(),
+                        b_research_block, st.session_state.get("seo_extra_notes", ""),
+                    )
+                    batch_results.append({
+                        "topic": t, "title": title, "meta": meta, "tags": tags,
+                        "content": content, "format": cfg["format"], "mode": mode,
+                        "images": images, "sources": b_sources, "error": None,
+                    })
+                except Exception as e:
+                    batch_results.append({"topic": t, "error": str(e)})
+            progress.progress(1.0, text="완료!")
+            st.session_state["batch_results"] = batch_results
+
+    batch_results = st.session_state.get("batch_results")
+    if batch_results:
+        ok_count = sum(1 for r in batch_results if not r.get("error"))
+        st.success(f"{ok_count}/{len(batch_results)}건 생성 완료")
+
+        import io
+        import zipfile
+
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for idx, r in enumerate(batch_results, 1):
+                if r.get("error"):
+                    continue
+                ext = "html" if r["format"] == "html" else "txt"
+                safe_name = re.sub(r"[\\/:*?\"<>|]", "_", r["title"] or r["topic"])[:60]
+                zf.writestr(f"{idx:02d}_{safe_name}.{ext}", r["content"])
+        st.download_button(
+            "⬇️ 전체 결과 ZIP으로 다운로드", data=zip_buf.getvalue(),
+            file_name="batch_posts.zip", mime="application/zip",
+        )
+
+        for idx, r in enumerate(batch_results, 1):
+            if r.get("error"):
+                st.error(f"{idx}. {r['topic']} — 생성 실패: {r['error']}")
+                continue
+            with st.expander(f"{idx}. [{r['mode']}] {r['title']}"):
+                st.markdown(f"**메타설명** {r['meta']}")
+                tag_chips = " ".join(f"`#{tg.strip()}`" for tg in r["tags"].split(",") if tg.strip())
+                st.markdown(f"**태그** {tag_chips}")
+                if r.get("sources"):
+                    st.caption(f"🔎 리서치 출처 {len(r['sources'])}건 반영됨")
+                if r["format"] == "html":
+                    st.code(r["content"], language="html")
+                else:
+                    st.code(r["content"], language=None)
+                ext = "html" if r["format"] == "html" else "txt"
+                st.download_button(
+                    "이 글만 다운로드", data=r["content"], file_name=f"{r['title'] or r['topic']}.{ext}",
+                    key=f"dl_{idx}",
+                )
