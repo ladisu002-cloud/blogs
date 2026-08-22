@@ -1,6 +1,5 @@
 import os
 import re
-import requests
 import streamlit as st
 import streamlit.components.v1 as components
 import google.generativeai as genai
@@ -21,7 +20,7 @@ QUALITY_RULES = (
     "독자를 오도할 수 있으므로, 대신 흔히 겪는 상황에 공감하는 화법으로 신뢰를 쌓으세요."
 )
 
-# 필자 고유 말투 가이드 (조회수 높았던 글 5편 분석 결과 — 모든 카테고리 공통 적용)
+# 필자 고유 말투 가이드 (조회수 높았던 글 분석 결과 — 모든 카테고리 공통 적용)
 STYLE_GUIDE = (
     "다음은 이 블로그 필자의 고유한 말투이니 반드시 반영하세요: "
     "도입부는 '안녕하세요!' 같은 짧은 인사, 또는 독자의 경험에 공감을 구하는 질문"
@@ -52,8 +51,6 @@ IMAGE_PROMPT_RULES = (
     "프롬프트를 본문과 별도로 ###IMAGES### 섹션에 한 줄씩 작성하세요 (예: [이미지1] A cozy realistic photo of ...). "
     "프롬프트는 사실적인 사진 스타일로 피사체·구도·조명·분위기를 구체적으로 묘사하세요."
 )
-
-# 건강정보 등 링크가 없을 수도 있는 카테고리를 위한 동적 CTA 안내는 generate_post에서 상황에 따라 주입한다.
 
 MODE_CONFIG = {
     "지원금/제도": {
@@ -248,68 +245,87 @@ def get_client():
     return genai
 
 
-def search_official_link(query):
-    """Google Programmable Search(Custom Search JSON API)로 공식 페이지를 자동 검색.
-    GOOGLE_CSE_KEY, GOOGLE_CSE_ID가 설정돼 있지 않으면 (None, 안내메시지)를 반환."""
-    cse_key = st.secrets.get("GOOGLE_CSE_KEY", None) or os.environ.get("GOOGLE_CSE_KEY")
-    cse_id = st.secrets.get("GOOGLE_CSE_ID", None) or os.environ.get("GOOGLE_CSE_ID")
-    if not cse_key or not cse_id:
-        return None, "미설정"
+# ────────────────────────────────────────────────────────────────
+# 웹 리서치 — Custom Search API 없이, Gemini 내장 구글 검색 연동(grounding) 사용
+# GOOGLE_API_KEY 하나로 작동한다. 별도 검색엔진 등록이 필요 없다.
+# ────────────────────────────────────────────────────────────────
+def _extract_grounding_sources(response):
+    sources = []
     try:
-        resp = requests.get(
-            "https://www.googleapis.com/customsearch/v1",
-            params={"key": cse_key, "cx": cse_id, "q": f"{query} 공식 사이트", "num": 3},
-            timeout=8,
-        )
-        items = resp.json().get("items", [])
-        return (items[0]["link"], None) if items else (None, "검색 결과 없음")
-    except Exception as e:
-        return None, str(e)
+        gm = getattr(response.candidates[0], "grounding_metadata", None)
+        if not gm:
+            return sources
+        for ch in (getattr(gm, "grounding_chunks", None) or []):
+            web = getattr(ch, "web", None)
+            if web and getattr(web, "uri", ""):
+                sources.append({"title": getattr(web, "title", "") or web.uri, "link": web.uri})
+    except Exception:
+        pass
+    return sources
+
+
+def _grounded_call(prompt, model_name="gemini-flash-latest", max_output_tokens=1200):
+    """구글 검색 연동을 켜고 Gemini를 호출. 모델/SDK 버전에 따라 tools 표기가 다를 수 있어
+    몇 가지 형식을 순서대로 시도하고, 전부 안 되면 검색 없이 일반 생성으로 대체한다."""
+    tool_variants = [{"google_search": {}}], "google_search_retrieval", None
+    for tools in tool_variants:
+        try:
+            model = genai.GenerativeModel(model_name, tools=tools) if tools else genai.GenerativeModel(model_name)
+            resp = model.generate_content(
+                prompt,
+                generation_config=genai.types.GenerationConfig(max_output_tokens=max_output_tokens, temperature=0.4),
+            )
+            if resp and resp.text and resp.text.strip():
+                sources = _extract_grounding_sources(resp) if tools else []
+                return resp.text.strip(), sources
+        except Exception:
+            continue
+    return "", []
+
+
+def search_official_link(query):
+    """공식 웹사이트/신청 페이지 URL을 Gemini의 구글 검색 연동으로 찾는다."""
+    text, sources = _grounded_call(
+        f"'{query}'의 공식 웹사이트 또는 공식 신청 페이지 URL을 정확히 찾아서 URL만 한 줄로 답해줘. "
+        f"설명 문구 없이 URL만 출력해.",
+        max_output_tokens=200,
+    )
+    if sources:  # grounding 출처가 있으면 모델이 베낀 텍스트보다 실제 출처 URL이 더 정확하다
+        return sources[0]["link"], None
+    m = re.search(r"https?://[^\s\"'<>]+", text)
+    if m:
+        return m.group(0), None
+    return None, "검색 결과 없음"
 
 
 def research_topic(topic, max_results=5):
-    """Google Custom Search로 주제 관련 자료를 실제 검색해서 (제목/스니펫/출처링크) 리스트로 반환.
-    이 결과가 writer 단계의 '리서치 자료'가 되어, 확인 안 된 내용을 지어내지 않도록 근거를 제공한다.
-    GOOGLE_CSE_KEY/GOOGLE_CSE_ID가 없으면 (None, '미설정')을 반환."""
-    cse_key = st.secrets.get("GOOGLE_CSE_KEY", None) or os.environ.get("GOOGLE_CSE_KEY")
-    cse_id = st.secrets.get("GOOGLE_CSE_ID", None) or os.environ.get("GOOGLE_CSE_ID")
-    if not cse_key or not cse_id:
-        return None, "미설정"
-    try:
-        resp = requests.get(
-            "https://www.googleapis.com/customsearch/v1",
-            params={"key": cse_key, "cx": cse_id, "q": topic, "num": max_results},
-            timeout=8,
-        )
-        items = resp.json().get("items", [])
-        results = [
-            {"title": it.get("title", ""), "snippet": it.get("snippet", ""), "link": it.get("link", "")}
-            for it in items
-        ]
-        return (results, None) if results else (None, "검색 결과 없음")
-    except Exception as e:
-        return None, str(e)
+    """주제에 대해 실제 검색 기반으로 세부 키워드/핵심 정보를 리서치.
+    반환값: (research_block 문자열, 출처 리스트) — research_block이 비어있으면 리서치 실패."""
+    prompt = f"""'{topic}'에 대해 구글 검색을 활용해 다음을 조사해줘:
+1. 사람들이 실제로 많이 검색할 만한 세부 키워드(연관 검색어) 5~8개
+2. 그중 경쟁이 상대적으로 약해 보이는 키워드 우선순위
+3. 이 주제에 대해 검색으로 확인 가능한 핵심 정보(수치·조건·절차 등, 최신 기준)를 간결하게 요약
+
+확인되지 않은 내용은 지어내지 말고, 검색으로 실제 확인한 내용 위주로 정리해줘.
+한국어로, 800자 이내로 간결하게."""
+    text, sources = _grounded_call(prompt, max_output_tokens=1400)
+    if not text:
+        return "", []
+    block = (
+        "다음은 이 주제에 대해 웹 검색으로 실제 조사한 리서치 자료입니다. "
+        "이 자료의 사실 관계를 우선순위로 삼아 작성하고, 여기 없는 내용을 사실처럼 지어내지 마세요:\n" + text
+    )
+    return block, sources
 
 
 def research_seo_rules(platform_hint):
-    """네이버/티스토리 등 플랫폼의 최신 상위노출 규칙을 웹에서 검색해서 근거자료로 반환.
-    검색 규칙은 계속 바뀌므로, 이 함수로 그때그때 다시 검색해 반영할 수 있다."""
-    query = f"{platform_hint} 블로그 상위노출 SEO 규칙 최신"
-    return research_topic(query, max_results=5)
-
-
-def format_research_block(results):
-    """research_topic() 결과를 writer 프롬프트에 그대로 넣을 수 있는 텍스트 블록으로 변환."""
-    if not results:
-        return ""
-    lines = [
-        "다음은 이 주제에 대해 웹에서 실제로 찾은 참고 자료입니다. "
-        "이 자료의 사실 관계를 우선순위로 삼아 작성하고, 여기 없는 내용을 사실처럼 지어내지 마세요. "
-        "수치나 날짜, 조건처럼 틀리면 안 되는 정보는 반드시 이 자료 범위 안에서만 사용하세요:",
-    ]
-    for i, r in enumerate(results, 1):
-        lines.append(f"{i}. {r['title']} — {r['snippet']} (출처: {r['link']})")
-    return "\n".join(lines)
+    """네이버/티스토리 등 플랫폼의 최신 상위노출 규칙을 구글 검색 연동으로 조사."""
+    prompt = (
+        f"{platform_hint} 블로그의 2026년 기준 최신 SEO 상위노출 규칙을 구글 검색으로 조사해줘. "
+        f"제목 규칙, 본문 구조·분량, 키워드 밀도·위치, 이미지 개수, 해시태그, 저품질/금지 패턴을 "
+        f"항목별로 간결하게 정리해줘. 확인 안 된 내용은 지어내지 마. 한국어로 700자 이내."
+    )
+    return _grounded_call(prompt, max_output_tokens=1200)
 
 
 def extract_between(text, start_marker, end_marker):
@@ -366,9 +382,6 @@ CTA 안내: {cta_note}
         model = client.GenerativeModel(model_name, system_instruction=cfg["system"])
         gen_kwargs = {"max_output_tokens": 8192, "temperature": 0.8}
         if thinking_budget is not None:
-            # 최신 Gemini 모델은 기본적으로 '생각(thinking)' 토큰을 먼저 쓴다.
-            # 완전히 0으로 끄면 다중 조건 준수(키워드 배치·구조·분량)의 품질이 떨어질 수 있어
-            # 소량만 남겨두고, 그래도 모자라면 0으로, 그래도 안 되면 필드 자체를 빼고 재시도한다.
             gen_kwargs["thinking_config"] = genai.types.ThinkingConfig(thinking_budget=thinking_budget)
         resp = model.generate_content(
             user_prompt, generation_config=genai.types.GenerationConfig(**gen_kwargs)
@@ -386,7 +399,7 @@ CTA 안내: {cta_note}
                 continue
             if best is None or len(candidate) > len(best):
                 best = candidate
-            if "###END###" in candidate:  # 마커까지 도달했는지로 '완결' 여부를 실제 확인
+            if "###END###" in candidate:
                 raw = candidate
                 break
         if raw:
@@ -394,7 +407,7 @@ CTA 안내: {cta_note}
     if not raw:
         if not best:
             raise RuntimeError("모델 응답을 받지 못했습니다. 잠시 후 다시 시도해 주세요.")
-        raw = best  # 완결 마커는 없지만 그나마 가장 긴 응답으로 대체 (아래에서 안전하게 파싱)
+        raw = best
 
     title = extract_between(raw, "###TITLE###", "###META###")
     meta = extract_between(raw, "###META###", "###TAGS###")
@@ -413,15 +426,12 @@ CTA 안내: {cta_note}
     if mode == "건강정보" and HEALTH_DISCLAIMER not in content:
         content += f'<div class="jb-tip"><b>안내</b> {HEALTH_DISCLAIMER}</div>'
 
-    # 애드센스 광고 자동 삽입 (html 카테고리만 해당)
     html_repaired = False
     if cfg["format"] == "html":
         ad_code = st.session_state.get("adsense_code", "").strip()
         replacement = f'<div class="jb-ad-slot">{ad_code}</div>' if ad_code else ""
         content = content.replace("<!--AD_SLOT-->", replacement)
 
-        # 태그 균형 자동 보정: 모델이 가끔 div를 안 닫아서, Tistory가 이걸 다시 파싱할 때
-        # 이후 내용(이미지 자리 포함)이 엉뚱한 위치로 밀려나는 문제를 방지한다.
         pre_open, pre_close = content.count("<div"), content.count("</div>")
         html_repaired = pre_open != pre_close
         try:
@@ -518,6 +528,8 @@ if client is None:
         )
     client = get_client()
 
+search_ready = client is not None  # 별도 검색엔진 등록 없이, API 키만 있으면 웹 리서치 사용 가능
+
 with st.sidebar:
     st.caption("🆓 Gemini Flash 무료 티어 사용 중 (모델은 Google이 자동으로 최신 버전 유지)")
     st.divider()
@@ -535,35 +547,29 @@ with st.sidebar:
                "실제 티스토리에 붙여넣으면 정상 노출됩니다.")
 
     st.divider()
-    st.subheader("🔎 공식 링크 자동 검색 (선택)")
-    cse_ready = bool(
-        (st.secrets.get("GOOGLE_CSE_KEY", None) or os.environ.get("GOOGLE_CSE_KEY"))
-        and (st.secrets.get("GOOGLE_CSE_ID", None) or os.environ.get("GOOGLE_CSE_ID"))
-    )
-    if cse_ready:
-        st.success("자동 검색 사용 가능 — 링크를 비워두면 자동으로 채워집니다.")
+    st.subheader("🔎 웹 리서치 / 공식 링크 자동 검색")
+    if search_ready:
+        st.success("사용 가능 — Gemini에 내장된 구글 검색 연동을 그대로 씁니다. 별도 등록 필요 없음.")
     else:
-        st.caption(
-            "링크 입력칸을 비워도 자동으로 채우려면 Google Custom Search를 등록하세요:\n\n"
-            "1. programmablesearchengine.google.com 에서 검색엔진 생성 (전체 웹 검색으로 설정) → 검색엔진 ID 확인\n"
-            "2. console.cloud.google.com 에서 'Custom Search API' 활성화 후 API 키 발급 (무료, 하루 100건)\n"
-            "3. Streamlit Secrets에 GOOGLE_CSE_ID, GOOGLE_CSE_KEY 등록"
-        )
+        st.caption("GOOGLE_API_KEY만 설정되면 자동으로 사용 가능합니다 (별도 검색엔진 등록 불필요).")
 
     st.divider()
     st.subheader("📈 검색 규칙(SEO) 새로고침 (선택)")
-    st.caption("네이버·티스토리 상위노출 규칙은 계속 바뀌므로, 필요할 때 웹에서 다시 검색해 아래 노트에 반영하세요. "
+    st.caption("네이버·티스토리 상위노출 규칙은 계속 바뀌므로, 필요할 때 다시 검색해 아래 노트에 반영하세요. "
                "저장한 노트는 앞으로 생성되는 모든 글의 시스템 규칙에 자동으로 추가됩니다.")
     platform_hint = st.selectbox("검색 대상 플랫폼", ["네이버", "티스토리"], key="seo_refresh_platform")
-    if st.button("🔎 최신 SEO 규칙 검색", disabled=not cse_ready):
-        results, err = research_seo_rules(platform_hint)
-        st.session_state["seo_refresh_results"] = results or []
-        if err and not results:
-            st.warning(f"검색 실패: {err}")
-    if not cse_ready:
-        st.caption("⚠️ 이 기능도 위의 Google Custom Search 등록이 필요합니다.")
-    for r in st.session_state.get("seo_refresh_results", []):
-        st.markdown(f"- [{r['title']}]({r['link']}) — {r['snippet']}")
+    if st.button("🔎 최신 SEO 규칙 검색", disabled=not search_ready):
+        with st.spinner("검색 중…"):
+            text, sources = research_seo_rules(platform_hint)
+        if text:
+            st.session_state["seo_refresh_text"] = text
+            st.session_state["seo_refresh_sources"] = sources
+        else:
+            st.warning("검색 결과를 가져오지 못했습니다. 잠시 후 다시 시도해 주세요.")
+    if st.session_state.get("seo_refresh_text"):
+        st.markdown(st.session_state["seo_refresh_text"])
+        for r in st.session_state.get("seo_refresh_sources", []):
+            st.caption(f"출처: [{r['title']}]({r['link']})")
     st.session_state["seo_extra_notes"] = st.text_area(
         "검색 규칙 메모 (여기에 정리해서 적으면 생성 시 자동 반영)",
         value=st.session_state.get("seo_extra_notes", ""),
@@ -603,13 +609,10 @@ with col_input:
     extra = st.text_area("추가 반영사항 (선택)", placeholder="예: 청주 지역 특화, 2026년 기준 등")
 
     use_research = st.checkbox(
-        "🔎 웹 리서치 사용 (출처 기반으로 작성)", value=cse_ready,
-        help="Google Custom Search로 주제를 실제 검색해서 그 결과를 근거로 글을 씁니다. "
-             "미설정 상태면 검색 없이 모델 자체 지식으로만 작성됩니다.",
-        disabled=not cse_ready,
+        "🔎 웹 리서치 사용 (실제 검색 결과 기반으로 작성)", value=search_ready,
+        help="Gemini의 구글 검색 연동으로 주제를 실제 검색해서 그 결과를 근거로 글을 씁니다.",
+        disabled=not search_ready,
     )
-    if not cse_ready:
-        st.caption("⚠️ 리서치를 쓰려면 왼쪽 사이드바 안내대로 GOOGLE_CSE_KEY/GOOGLE_CSE_ID를 등록하세요.")
 
     generate = st.button("✨ 블로그 글 생성하기", type="primary", use_container_width=True)
 
@@ -625,30 +628,23 @@ with col_output:
             if cfg["format"] == "html":
                 if not resolved_link1:
                     found, err = search_official_link(topic.strip())
+                    resolved_link1 = found if found else "[링크 입력]"
                     if found:
-                        resolved_link1 = found
                         auto_used.append(("링크1", found))
-                    else:
-                        resolved_link1 = "[링크 입력]"
                 if cfg["link_mode"] == "dual" and not resolved_link2:
                     found, err = search_official_link(topic.strip())
+                    resolved_link2 = found if found else "[링크 입력]"
                     if found:
-                        resolved_link2 = found
                         auto_used.append(("링크2", found))
-                    else:
-                        resolved_link2 = "[링크 입력]"
             resolved_link1 = resolved_link1 or "[링크 입력]"
             resolved_link2 = resolved_link2 or resolved_link1
 
             research_block, research_sources = "", []
-            if use_research and cse_ready:
+            if use_research and search_ready:
                 with st.spinner("주제를 웹에서 리서치하는 중…"):
-                    results, err = research_topic(topic.strip())
-                    if results:
-                        research_block = format_research_block(results)
-                        research_sources = results
-                    elif err not in ("검색 결과 없음",):
-                        st.warning(f"리서치 검색에 실패해서 리서치 없이 진행합니다: {err}")
+                    research_block, research_sources = research_topic(topic.strip())
+                    if not research_block:
+                        st.warning("리서치 검색에 실패해서 리서치 없이 진행합니다.")
 
             with st.spinner("SEO 구조에 맞춰 글을 작성하는 중…"):
                 try:
@@ -678,7 +674,7 @@ with col_output:
         if result.get("research_sources"):
             with st.expander(f"🔎 리서치 출처 {len(result['research_sources'])}건 (이 자료를 근거로 작성됨)"):
                 for r in result["research_sources"]:
-                    st.markdown(f"- [{r['title']}]({r['link']}) — {r['snippet']}")
+                    st.markdown(f"- [{r['title']}]({r['link']})")
 
         st.markdown(f"**[{result['mode']}] 제목** {result['title']}")
         st.markdown(f"**메타설명** {result['meta']}")
@@ -762,13 +758,9 @@ with st.expander("📅 여러 주제 한 번에 생성 (배치 — 30일치/1주
                     b_link1 = b_link1 or "[링크 입력]"
                     b_link2 = b_link2 or b_link1
 
-                    b_research_block = ""
-                    b_sources = []
-                    if use_research and cse_ready:
-                        results, _ = research_topic(t)
-                        if results:
-                            b_research_block = format_research_block(results)
-                            b_sources = results
+                    b_research_block, b_sources = "", []
+                    if use_research and search_ready:
+                        b_research_block, b_sources = research_topic(t)
 
                     title, meta, tags, content, images, html_repaired = generate_post(
                         client, mode, t, b_link1, b_link2, tone_key, length_key, extra.strip(),
