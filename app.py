@@ -270,18 +270,20 @@ def _extract_grounding_sources(response):
 
 def _grounded_call(prompt, model_name="gemini-flash-latest", max_output_tokens=1200):
     tool_variants = [{"google_search": {}}], "google_search_retrieval", None
+    thinking_variants = (0, None)  # 생각 토큰이 답변 예산을 먼저 잡아먹어 잘리는 문제 방지 (0 먼저 시도)
     for tools in tool_variants:
-        try:
-            model = genai.GenerativeModel(model_name, tools=tools) if tools else genai.GenerativeModel(model_name)
-            resp = model.generate_content(
-                prompt,
-                generation_config=genai.types.GenerationConfig(max_output_tokens=max_output_tokens, temperature=0.4),
-            )
-            if resp and resp.text and resp.text.strip():
-                sources = _extract_grounding_sources(resp) if tools else []
-                return resp.text.strip(), sources
-        except Exception:
-            continue
+        for tb in thinking_variants:
+            try:
+                model = genai.GenerativeModel(model_name, tools=tools) if tools else genai.GenerativeModel(model_name)
+                gen_kwargs = {"max_output_tokens": max_output_tokens, "temperature": 0.4}
+                if tb is not None:
+                    gen_kwargs["thinking_config"] = genai.types.ThinkingConfig(thinking_budget=tb)
+                resp = model.generate_content(prompt, generation_config=genai.types.GenerationConfig(**gen_kwargs))
+                if resp and resp.text and resp.text.strip():
+                    sources = _extract_grounding_sources(resp) if tools else []
+                    return resp.text.strip(), sources
+            except Exception:
+                continue
     return "", []
 
 
@@ -324,16 +326,16 @@ def research_seo_rules(platform_hint):
     return _grounded_call(prompt, max_output_tokens=1200)
 
 
-def suggest_trending_topics(content_key):
+def suggest_trending_topics(content_key, count=8):
     hint = CONTENT_TYPES[content_key]["trend_hint"]
     prompt = f"""요즘({hint}) 관련해서 사람들이 실제로 많이 검색하는 주제나 키워드를
-검색 결과를 바탕으로 8개 뽑아줘. 블로그 글 주제로 바로 쓸 수 있는 짧은 명사구로,
+검색 결과를 바탕으로 {count}개 뽑아줘. 블로그 글 주제로 바로 쓸 수 있는 짧은 명사구로,
 번호·설명·부가문구 없이 한 줄에 하나씩만 출력해."""
-    text, sources = _grounded_call(prompt, max_output_tokens=400)
+    text, sources = _grounded_call(prompt, max_output_tokens=900)
     if not text:
         return [], []
     keywords = [re.sub(r"^[\-\•\d\.\)\s]+", "", line).strip() for line in text.splitlines() if line.strip()]
-    return [k for k in keywords if k][:8], sources
+    return [k for k in keywords if k][:count], sources
 
 
 def datalab_ready():
@@ -345,7 +347,7 @@ def datalab_ready():
 def verify_with_datalab(keywords, days=30):
     """네이버 데이터랩 검색어트렌드 API로 후보 키워드들의 상대 검색량을 비교해 순위를 매긴다.
     실시간 급상승 검색어는 제공되지 않으므로(2021년 서비스 종료), '발굴'이 아니라 '검증' 용도로만 쓴다.
-    NAVER_CLIENT_ID/NAVER_CLIENT_SECRET이 없으면 (None, '미설정')을 반환한다."""
+    한 번에 최대 5개까지만 비교 가능하다(네이버 API 제한). NAVER_CLIENT_ID/SECRET이 없으면 (None, '미설정')."""
     cid = st.secrets.get("NAVER_CLIENT_ID", None) or os.environ.get("NAVER_CLIENT_ID")
     csec = st.secrets.get("NAVER_CLIENT_SECRET", None) or os.environ.get("NAVER_CLIENT_SECRET")
     if not cid or not csec or not keywords:
@@ -366,10 +368,27 @@ def verify_with_datalab(keywords, days=30):
             vals = [p.get("ratio", 0) for p in r.get("data", [])]
             avg = sum(vals) / len(vals) if vals else 0
             scored.append({"keyword": r.get("title", ""), "score": round(avg, 1)})
-        scored.sort(key=lambda x: x["score"], reverse=True)
         return scored, None
     except Exception as e:
         return None, str(e)
+
+
+def verify_with_datalab_all(keywords, days=30):
+    """keywords 전체(개수 제한 없음)를 5개씩 나눠서 verify_with_datalab을 반복 호출하고,
+    하나로 합쳐서 검색량 기준 내림차순 정렬한 전체 순위 리스트를 반환한다.
+    일부 묶음이 실패해도 나머지는 그대로 반환하고, 검증 실패한 키워드는 unscored로 따로 담는다."""
+    if not keywords:
+        return [], []
+    scored_all, unscored = [], []
+    for i in range(0, len(keywords), 5):
+        chunk = keywords[i:i + 5]
+        result, err = verify_with_datalab(chunk, days)
+        if result:
+            scored_all.extend(result)
+        else:
+            unscored.extend(chunk)
+    scored_all.sort(key=lambda x: x["score"], reverse=True)
+    return scored_all, unscored
 
 
 def extract_between(text, start_marker, end_marker):
@@ -639,62 +658,81 @@ with st.sidebar:
     st.caption("티스토리 관리자 → 꾸미기 → 스킨 편집 → CSS 탭 맨 아래에 한 번만 붙여넣으세요.")
     st.code(SKIN_CSS.strip(), language="css")
 
-col_input, col_output = st.columns([1, 1.6], gap="large")
+col_nav, col_main = st.columns([0.85, 3], gap="large")
 
-with col_input:
-    platform_key = st.pills("발행 플랫폼", list(PLATFORMS.keys()), default=list(PLATFORMS.keys())[0])
-    if not platform_key:
-        platform_key = list(PLATFORMS.keys())[0]
-    pcfg = PLATFORMS[platform_key]
+with col_nav:
+    st.markdown("**✏️ 글쓰기 메뉴**")
+    platform_key = st.radio("플랫폼", list(PLATFORMS.keys()), key="nav_platform")
+    st.divider()
+    content_key = st.radio("유형", list(CONTENT_TYPES.keys()), key="nav_content")
 
-    content_key = st.pills("글 유형", list(CONTENT_TYPES.keys()), default=list(CONTENT_TYPES.keys())[0])
-    if not content_key:
-        content_key = list(CONTENT_TYPES.keys())[0]
-    ccfg = CONTENT_TYPES[content_key]
+pcfg = PLATFORMS[platform_key]
+ccfg = CONTENT_TYPES[content_key]
+
+with col_main:
+    st.markdown(f"### {platform_key} · {content_key}")
 
     with st.expander("🔥 요즘 인기 키워드 추천받기", expanded=True):
         dl_ready = datalab_ready()
         st.caption(
             "실시간 구글 검색 기반으로 후보를 뽑고" + (
-                ", 네이버 데이터랩으로 상대 검색량까지 검증해서 순위를 매깁니다."
+                ", 네이버 데이터랩으로 상대 검색량까지 검증해서 전체 순위를 매깁니다."
                 if dl_ready else
-                " 순서대로 보여드려요. (네이버 데이터랩을 연결하면 실제 검색량 기준으로 순위까지 매길 수 있어요 — 사이드바 참고)"
+                " 순서대로 보여드려요. (네이버 데이터랩을 연결하면 실제 검색량 기준 전체 순위를 매길 수 있어요 — 사이드바 참고)"
             ) + " 계정 로그인이 필요한 크리에이터 어드바이저의 '내 통계'는 가져올 수 없지만, "
             "그 화면을 캡처/복사해서 아래 '추가 반영사항'에 붙여넣으면 그대로 반영됩니다."
         )
-        if st.button("🔎 추천 + 검증", disabled=not search_ready, key="trend_btn"):
-            with st.spinner("인기 키워드를 검색하는 중…"):
-                kws, _ = suggest_trending_topics(content_key)
-            scored = None
-            if kws and dl_ready:
-                with st.spinner("데이터랩으로 검색량 검증하는 중…"):
-                    scored, err = verify_with_datalab(kws)
-            st.session_state["trend_suggestions"] = kws
-            st.session_state["trend_scored"] = scored
+        all_categories = st.checkbox("전체 유형별로 나눠서 보기 (지원금·축제·건강정보·쿠팡파트너스·일반)", value=False)
 
-        scored = st.session_state.get("trend_scored")
-        kws = st.session_state.get("trend_suggestions", [])
-        if scored:
-            st.caption("📊 데이터랩 상대 검색량 기준 순위 (높을수록 최근 검색량이 많음)")
-            for i, item in enumerate(scored, 1):
-                if st.button(f"{i}위 · {item['keyword']} (지수 {item['score']})", key=f"trend_scored_{i}"):
-                    st.session_state["topic_input"] = item["keyword"]
-                    st.rerun()
-            # 데이터랩 그룹에 못 들어간 나머지 후보(5개 초과분)도 아래에 표시
-            leftover = [k for k in kws if k not in [s["keyword"] for s in scored]]
-            if leftover:
-                st.caption("검증 대상(상위 5개)에는 못 들었지만 함께 추천된 키워드")
+        def _render_ranked(kws, key_prefix):
+            """추천 키워드 목록을 데이터랩 검증 결과와 함께 순위 버튼으로 렌더링."""
+            if not kws:
+                st.caption("추천 결과가 없습니다.")
+                return
+            if dl_ready:
+                with st.spinner("데이터랩으로 검색량 검증하는 중…"):
+                    scored, unscored = verify_with_datalab_all(kws)
+                for i, item in enumerate(scored, 1):
+                    if st.button(f"{i}위 · {item['keyword']} (지수 {item['score']})", key=f"{key_prefix}_s_{i}"):
+                        st.session_state["topic_input"] = item["keyword"]
+                        st.rerun()
+                if unscored:
+                    st.caption("검증 실패(데이터랩 응답 없음) — 그래도 추천 후보입니다")
+                    cols = st.columns(2)
+                    for i, kw in enumerate(unscored):
+                        if cols[i % 2].button(kw, key=f"{key_prefix}_u_{i}"):
+                            st.session_state["topic_input"] = kw
+                            st.rerun()
+            else:
                 cols = st.columns(2)
-                for i, kw in enumerate(leftover):
-                    if cols[i % 2].button(kw, key=f"trend_extra_{i}"):
+                for i, kw in enumerate(kws):
+                    if cols[i % 2].button(kw, key=f"{key_prefix}_{i}"):
                         st.session_state["topic_input"] = kw
                         st.rerun()
-        elif kws:
-            cols = st.columns(2)
-            for i, kw in enumerate(kws):
-                if cols[i % 2].button(kw, key=f"trend_{i}"):
-                    st.session_state["topic_input"] = kw
-                    st.rerun()
+
+        if st.button("🔎 추천 + 검증", disabled=not search_ready, key="trend_btn"):
+            if all_categories:
+                grouped = {}
+                with st.spinner("전체 유형별로 인기 키워드를 검색하는 중… (시간이 좀 걸려요)"):
+                    for i, ck in enumerate(CONTENT_TYPES.keys()):
+                        if i > 0:
+                            time.sleep(2)  # 무료 티어 속도 제한 방지
+                        kws, _ = suggest_trending_topics(ck, count=5)
+                        grouped[ck] = kws
+                st.session_state["trend_grouped"] = grouped
+                st.session_state["trend_suggestions"] = None
+            else:
+                with st.spinner("인기 키워드를 검색하는 중…"):
+                    kws, _ = suggest_trending_topics(content_key, count=8)
+                st.session_state["trend_suggestions"] = kws
+                st.session_state["trend_grouped"] = None
+
+        if st.session_state.get("trend_grouped"):
+            for ck, kws in st.session_state["trend_grouped"].items():
+                st.markdown(f"**{ck}**")
+                _render_ranked(kws, key_prefix=f"grp_{ck}")
+        elif st.session_state.get("trend_suggestions"):
+            _render_ranked(st.session_state["trend_suggestions"], key_prefix="single")
 
     topic = st.text_input(ccfg["topic_label"], placeholder=ccfg["topic_placeholder"], key="topic_input")
 
@@ -721,8 +759,8 @@ with col_input:
     )
 
     generate = st.button("✨ 블로그 글 생성하기", type="primary", use_container_width=True)
+    st.divider()
 
-with col_output:
     if generate:
         if not topic.strip():
             st.error("주제를 입력해 주세요.")
