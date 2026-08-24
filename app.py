@@ -269,8 +269,16 @@ def _extract_grounding_sources(response):
 
 
 def _grounded_call(prompt, model_name="gemini-flash-latest", max_output_tokens=1200):
+    """반환값: (텍스트, 출처리스트, grounded 여부). grounded=False면 실시간 검색이 아니라
+    모델의 기존 학습 지식만으로 답한 것이므로, 오래된 정보일 위험이 있다는 뜻이다."""
+    today = datetime.date.today().isoformat()
+    dated_prompt = (
+        f"[오늘 날짜: {today}] 이 날짜 기준 최신 정보만 답하고, 지난 연도(예: 2024, 2025년)의 "
+        f"행사·정보를 올해 것처럼 제시하지 마. 검색으로 확인 못 하면 '최신 정보를 확인하지 못했다'고 답해.\n\n"
+        + prompt
+    )
     tool_variants = [{"google_search": {}}], "google_search_retrieval", None
-    thinking_variants = (0, None)  # 생각 토큰이 답변 예산을 먼저 잡아먹어 잘리는 문제 방지 (0 먼저 시도)
+    thinking_variants = (0, None)
     for tools in tool_variants:
         for tb in thinking_variants:
             try:
@@ -278,17 +286,18 @@ def _grounded_call(prompt, model_name="gemini-flash-latest", max_output_tokens=1
                 gen_kwargs = {"max_output_tokens": max_output_tokens, "temperature": 0.4}
                 if tb is not None:
                     gen_kwargs["thinking_config"] = genai.types.ThinkingConfig(thinking_budget=tb)
-                resp = model.generate_content(prompt, generation_config=genai.types.GenerationConfig(**gen_kwargs))
+                resp = model.generate_content(dated_prompt, generation_config=genai.types.GenerationConfig(**gen_kwargs))
                 if resp and resp.text and resp.text.strip():
                     sources = _extract_grounding_sources(resp) if tools else []
-                    return resp.text.strip(), sources
+                    grounded = bool(tools) and bool(sources)
+                    return resp.text.strip(), sources, grounded
             except Exception:
                 continue
-    return "", []
+    return "", [], False
 
 
 def search_official_link(query):
-    text, sources = _grounded_call(
+    text, sources, grounded = _grounded_call(
         f"'{query}'의 공식 웹사이트 또는 공식 신청 페이지 URL을 정확히 찾아서 URL만 한 줄로 답해줘. "
         f"설명 문구 없이 URL만 출력해.",
         max_output_tokens=200,
@@ -307,14 +316,14 @@ def research_topic(topic, max_results=5):
 
 확인되지 않은 내용은 지어내지 말고, 검색으로 실제 확인한 내용 위주로 정리해줘.
 한국어로, 800자 이내로 간결하게."""
-    text, sources = _grounded_call(prompt, max_output_tokens=1400)
+    text, sources, grounded = _grounded_call(prompt, max_output_tokens=1400)
     if not text:
-        return "", []
+        return "", [], False
     block = (
         "다음은 이 주제에 대해 웹 검색으로 실제 조사한 리서치 자료입니다. "
         "이 자료의 사실 관계를 우선순위로 삼아 작성하고, 여기 없는 내용을 사실처럼 지어내지 마세요:\n" + text
     )
-    return block, sources
+    return block, sources, grounded
 
 
 def research_seo_rules(platform_hint):
@@ -331,11 +340,11 @@ def suggest_trending_topics(content_key, count=8):
     prompt = f"""요즘({hint}) 관련해서 사람들이 실제로 많이 검색하는 주제나 키워드를
 검색 결과를 바탕으로 {count}개 뽑아줘. 블로그 글 주제로 바로 쓸 수 있는 짧은 명사구로,
 번호·설명·부가문구 없이 한 줄에 하나씩만 출력해."""
-    text, sources = _grounded_call(prompt, max_output_tokens=900)
+    text, sources, grounded = _grounded_call(prompt, max_output_tokens=900)
     if not text:
-        return [], []
+        return [], [], False
     keywords = [re.sub(r"^[\-\•\d\.\)\s]+", "", line).strip() for line in text.splitlines() if line.strip()]
-    return [k for k in keywords if k][:count], sources
+    return [k for k in keywords if k][:count], sources, grounded
 
 
 def datalab_ready():
@@ -637,13 +646,16 @@ with st.sidebar:
     platform_hint_sb = st.selectbox("검색 대상 플랫폼", ["네이버", "티스토리"], key="seo_refresh_platform")
     if st.button("🔎 최신 SEO 규칙 검색", disabled=not search_ready):
         with st.spinner("검색 중…"):
-            text, sources = research_seo_rules(platform_hint_sb)
+            text, sources, grounded = research_seo_rules(platform_hint_sb)
         if text:
             st.session_state["seo_refresh_text"] = text
             st.session_state["seo_refresh_sources"] = sources
+            st.session_state["seo_refresh_grounded"] = grounded
         else:
             st.warning("검색 결과를 가져오지 못했습니다.")
     if st.session_state.get("seo_refresh_text"):
+        if not st.session_state.get("seo_refresh_grounded"):
+            st.warning("⚠️ 실시간 검색 연동이 되지 않아 모델의 기존 지식으로 답한 결과예요 — 최신이 아닐 수 있습니다.")
         st.markdown(st.session_state["seo_refresh_text"])
         for r in st.session_state.get("seo_refresh_sources", []):
             st.caption(f"출처: [{r['title']}]({r['link']})")
@@ -660,34 +672,39 @@ with st.sidebar:
 
 col_nav, col_main = st.columns([0.85, 3], gap="large")
 
-with col_nav:
-    st.markdown("**✏️ 글쓰기 메뉴**")
-    platform_key = st.radio("플랫폼", list(PLATFORMS.keys()), key="nav_platform")
-    st.divider()
-    content_key = st.radio("유형", list(CONTENT_TYPES.keys()), key="nav_content")
+NAV_SECTIONS = ["🔥 키워드 추천", "📝 티스토리 글쓰기", "📄 네이버 글쓰기"]
+SECTION_PLATFORM = {"📝 티스토리 글쓰기": "티스토리 (HTML)", "📄 네이버 글쓰기": "네이버 (텍스트)"}
 
-pcfg = PLATFORMS[platform_key]
-ccfg = CONTENT_TYPES[content_key]
+with col_nav:
+    st.markdown("**✏️ 메뉴**")
+    nav_section = st.radio("메뉴", NAV_SECTIONS, key="nav_section", label_visibility="collapsed")
+    content_key = None
+    if nav_section in SECTION_PLATFORM:
+        st.divider()
+        content_key = st.radio("유형", list(CONTENT_TYPES.keys()), key="nav_content")
 
 with col_main:
-    st.markdown(f"### {platform_key} · {content_key}")
-
-    with st.expander("🔥 요즘 인기 키워드 추천받기", expanded=True):
+    if nav_section == "🔥 키워드 추천":
+        st.markdown("### 🔥 요즘 인기 키워드 추천받기")
         dl_ready = datalab_ready()
         st.caption(
-            "실시간 구글 검색 기반으로 후보를 뽑고" + (
+            "플랫폼과 무관하게 먼저 여기서 주제를 골라두면, 아래 '티스토리 글쓰기' / '네이버 글쓰기' 메뉴로 "
+            "넘어갈 때 주제 칸에 그대로 채워져 있어요. 실시간 구글 검색 기반으로 후보를 뽑고" + (
                 ", 네이버 데이터랩으로 상대 검색량까지 검증해서 전체 순위를 매깁니다."
                 if dl_ready else
                 " 순서대로 보여드려요. (네이버 데이터랩을 연결하면 실제 검색량 기준 전체 순위를 매길 수 있어요 — 사이드바 참고)"
             ) + " 계정 로그인이 필요한 크리에이터 어드바이저의 '내 통계'는 가져올 수 없지만, "
-            "그 화면을 캡처/복사해서 아래 '추가 반영사항'에 붙여넣으면 그대로 반영됩니다."
+            "그 화면을 캡처/복사해서 글쓰기 화면의 '추가 반영사항'에 붙여넣으면 그대로 반영됩니다."
         )
-        all_categories = st.checkbox("전체 유형별로 나눠서 보기 (지원금·축제·건강정보·쿠팡파트너스·일반)", value=False)
 
-        def _render_ranked(kws, key_prefix):
-            """추천 키워드 목록을 데이터랩 검증 결과와 함께 순위 버튼으로 렌더링."""
+        trend_category = st.selectbox("카테고리", list(CONTENT_TYPES.keys()), key="trend_category")
+        all_categories = st.checkbox("전체 카테고리별로 나눠서 보기 (지원금·축제·건강정보·쿠팡파트너스·일반)", value=False)
+
+        def _render_ranked(kws, grounded, key_prefix):
+            if not grounded:
+                st.warning("⚠️ 실시간 검색 연동이 안 돼서 모델의 기존 지식으로 답했어요 — 오래된 정보일 수 있습니다.")
             if not kws:
-                st.caption("추천 결과가 없습니다.")
+                st.caption("추천 결과를 가져오지 못했습니다. 잠시 후 다시 시도해 주세요.")
                 return
             if dl_ready:
                 with st.spinner("데이터랩으로 검색량 검증하는 중…"):
@@ -713,59 +730,67 @@ with col_main:
         if st.button("🔎 추천 + 검증", disabled=not search_ready, key="trend_btn"):
             if all_categories:
                 grouped = {}
-                with st.spinner("전체 유형별로 인기 키워드를 검색하는 중… (시간이 좀 걸려요)"):
+                with st.spinner("전체 카테고리별로 인기 키워드를 검색하는 중… (시간이 좀 걸려요)"):
                     for i, ck in enumerate(CONTENT_TYPES.keys()):
                         if i > 0:
-                            time.sleep(2)  # 무료 티어 속도 제한 방지
-                        kws, _ = suggest_trending_topics(ck, count=5)
-                        grouped[ck] = kws
+                            time.sleep(2)
+                        kws, _, grounded = suggest_trending_topics(ck, count=5)
+                        grouped[ck] = (kws, grounded)
                 st.session_state["trend_grouped"] = grouped
                 st.session_state["trend_suggestions"] = None
             else:
                 with st.spinner("인기 키워드를 검색하는 중…"):
-                    kws, _ = suggest_trending_topics(content_key, count=8)
-                st.session_state["trend_suggestions"] = kws
+                    kws, _, grounded = suggest_trending_topics(trend_category, count=8)
+                st.session_state["trend_suggestions"] = (kws, grounded)
                 st.session_state["trend_grouped"] = None
 
         if st.session_state.get("trend_grouped"):
-            for ck, kws in st.session_state["trend_grouped"].items():
+            for ck, (kws, grounded) in st.session_state["trend_grouped"].items():
                 st.markdown(f"**{ck}**")
-                _render_ranked(kws, key_prefix=f"grp_{ck}")
+                _render_ranked(kws, grounded, key_prefix=f"grp_{ck}")
         elif st.session_state.get("trend_suggestions"):
-            _render_ranked(st.session_state["trend_suggestions"], key_prefix="single")
+            kws, grounded = st.session_state["trend_suggestions"]
+            _render_ranked(kws, grounded, key_prefix="single")
 
-    topic = st.text_input(ccfg["topic_label"], placeholder=ccfg["topic_placeholder"], key="topic_input")
-
-    if ccfg["link_mode"] == "dual":
-        link1_in = st.text_input(ccfg["link1_label"], placeholder="https://... (비우면 자동 검색)")
-        link2_in = st.text_input(ccfg["link2_label"], placeholder="https://... (비우면 자동 검색)")
     else:
-        link1_in = st.text_input(ccfg["link1_label"], placeholder="https://...")
-        link2_in = link1_in
-        if content_key == "쿠팡파트너스":
-            st.caption("⚠️ 쿠팡 파트너스 이용약관상 링크는 실제 발급받은 파트너스 링크만 사용해야 합니다.")
+        platform_key = SECTION_PLATFORM[nav_section]
+        pcfg = PLATFORMS[platform_key]
+        ccfg = CONTENT_TYPES[content_key]
 
-    c1, c2 = st.columns(2)
-    with c1:
-        tone_key = st.selectbox("말투", list(TONE_OPTIONS.keys()))
-    with c2:
-        length_key = st.selectbox("분량", list(LENGTH_OPTIONS.keys()), index=1)
-    extra = st.text_area("추가 반영사항 (선택)", placeholder="예: 청주 지역 특화, 2026년 기준, 크리에이터 어드바이저 통계 붙여넣기 등")
+        st.markdown(f"### {platform_key} · {content_key}")
 
-    use_research = st.checkbox(
-        "🔎 웹 리서치 사용 (실제 검색 결과 기반으로 작성)", value=search_ready,
-        help="Gemini의 구글 검색 연동으로 주제를 실제 검색해서 그 결과를 근거로 글을 씁니다.",
-        disabled=not search_ready,
-    )
+        topic = st.text_input(ccfg["topic_label"], placeholder=ccfg["topic_placeholder"], key="topic_input")
 
-    generate = st.button("✨ 블로그 글 생성하기", type="primary", use_container_width=True)
-    st.divider()
+        if ccfg["link_mode"] == "dual":
+            link1_in = st.text_input(ccfg["link1_label"], placeholder="https://... (비우면 자동 검색)")
+            link2_in = st.text_input(ccfg["link2_label"], placeholder="https://... (비우면 자동 검색)")
+        else:
+            link1_in = st.text_input(ccfg["link1_label"], placeholder="https://...")
+            link2_in = link1_in
+            if content_key == "쿠팡파트너스":
+                st.caption("⚠️ 쿠팡 파트너스 이용약관상 링크는 실제 발급받은 파트너스 링크만 사용해야 합니다.")
 
-    if generate:
-        if not topic.strip():
-            st.error("주제를 입력해 주세요.")
-        elif client is None:
-            st.error("Google API 키가 필요합니다.")
+        c1, c2 = st.columns(2)
+        with c1:
+            tone_key = st.selectbox("말투", list(TONE_OPTIONS.keys()))
+        with c2:
+            length_key = st.selectbox("분량", list(LENGTH_OPTIONS.keys()), index=1)
+        extra = st.text_area("추가 반영사항 (선택)", placeholder="예: 청주 지역 특화, 2026년 기준, 크리에이터 어드바이저 통계 붙여넣기 등")
+
+        use_research = st.checkbox(
+            "🔎 웹 리서치 사용 (실제 검색 결과 기반으로 작성)", value=search_ready,
+            help="Gemini의 구글 검색 연동으로 주제를 실제 검색해서 그 결과를 근거로 글을 씁니다.",
+            disabled=not search_ready,
+        )
+
+        generate = st.button("✨ 블로그 글 생성하기", type="primary", use_container_width=True)
+        st.divider()
+
+        if generate:
+            if not topic.strip():
+                st.error("주제를 입력해 주세요.")
+            elif client is None:
+                st.error("Google API 키가 필요합니다.")
         else:
             fmt = pcfg["format"]
             resolved_link1, resolved_link2 = link1_in.strip(), link2_in.strip()
@@ -784,12 +809,14 @@ with col_main:
             resolved_link1 = resolved_link1 or "[링크 입력]"
             resolved_link2 = resolved_link2 or resolved_link1
 
-            research_block, research_sources = "", []
+            research_block, research_sources, research_grounded = "", [], False
             if use_research and search_ready:
                 with st.spinner("주제를 웹에서 리서치하는 중…"):
-                    research_block, research_sources = research_topic(topic.strip())
+                    research_block, research_sources, research_grounded = research_topic(topic.strip())
                     if not research_block:
                         st.warning("리서치 검색에 실패해서 리서치 없이 진행합니다.")
+                    elif not research_grounded:
+                        st.warning("⚠️ 실시간 검색 연동이 안 돼서 모델의 기존 지식으로 리서치했어요 — 최신이 아닐 수 있습니다.")
 
             with st.spinner("SEO 구조에 맞춰 글을 작성하는 중…"):
                 try:
@@ -804,143 +831,145 @@ with col_main:
                         "content": content, "format": fmt, "mode": f"{platform_key} · {content_key}",
                         "checks": checks, "auto_used": auto_used, "images": images,
                         "html_repaired": html_repaired, "research_sources": research_sources,
+                        "research_grounded": research_grounded,
                     }
                 except Exception as e:
                     st.error(f"생성 중 오류가 발생했습니다: {e}")
 
-    result = st.session_state.get("result")
-    if result:
-        if result.get("auto_used"):
-            for label, url in result["auto_used"]:
-                st.info(f"🔎 {label}를 자동 검색으로 채웠습니다: {url} (필요하면 직접 수정하세요)")
-        if result.get("html_repaired"):
-            st.warning("⚠️ 원본 HTML에서 태그가 안 닫힌 부분이 감지되어 자동으로 정리했습니다.")
-        if result.get("research_sources"):
-            with st.expander(f"🔎 리서치 출처 {len(result['research_sources'])}건"):
-                for r in result["research_sources"]:
-                    st.markdown(f"- [{r['title']}]({r['link']})")
+        result = st.session_state.get("result")
+        if result:
+            if result.get("auto_used"):
+                for label, url in result["auto_used"]:
+                    st.info(f"🔎 {label}를 자동 검색으로 채웠습니다: {url} (필요하면 직접 수정하세요)")
+            if result.get("html_repaired"):
+                st.warning("⚠️ 원본 HTML에서 태그가 안 닫힌 부분이 감지되어 자동으로 정리했습니다.")
+            if result.get("research_sources"):
+                label = "🔎 리서치 출처" if result.get("research_grounded") else "⚠️ 리서치 결과 (실시간 검색 미확인 — 참고만 하세요)"
+                with st.expander(f"{label} {len(result['research_sources'])}건"):
+                    for r in result["research_sources"]:
+                        st.markdown(f"- [{r['title']}]({r['link']})")
 
-        st.markdown(f"**[{result['mode']}] 제목** {result['title']}")
-        st.markdown(f"**메타설명** {result['meta']}")
+            st.markdown(f"**[{result['mode']}] 제목** {result['title']}")
+            st.markdown(f"**메타설명** {result['meta']}")
 
-        ICONS = {"ok": "✅", "warn": "⚠️", "bad": "❌"}
-        checks = result.get("checks", [])
-        bad_count = sum(1 for _, s, _ in checks if s == "bad")
-        warn_count = sum(1 for _, s, _ in checks if s == "warn")
-        summary = "모든 항목 통과" if not bad_count and not warn_count else f"주의 {warn_count}건 · 문제 {bad_count}건"
-        tag_chips = " ".join(f"`#{t.strip()}`" for t in result["tags"].split(",") if t.strip())
-        st.markdown(f"**태그** {tag_chips}")
-        with st.expander(f"🔍 SEO 체크리스트 — {summary}", expanded=bool(bad_count)):
-            for label, status, detail in checks:
-                st.markdown(f"{ICONS.get(status, '•')} **{label}** — {detail}")
+            ICONS = {"ok": "✅", "warn": "⚠️", "bad": "❌"}
+            checks = result.get("checks", [])
+            bad_count = sum(1 for _, s, _ in checks if s == "bad")
+            warn_count = sum(1 for _, s, _ in checks if s == "warn")
+            summary = "모든 항목 통과" if not bad_count and not warn_count else f"주의 {warn_count}건 · 문제 {bad_count}건"
+            tag_chips = " ".join(f"`#{t.strip()}`" for t in result["tags"].split(",") if t.strip())
+            st.markdown(f"**태그** {tag_chips}")
+            with st.expander(f"🔍 SEO 체크리스트 — {summary}", expanded=bool(bad_count)):
+                for label, status, detail in checks:
+                    st.markdown(f"{ICONS.get(status, '•')} **{label}** — {detail}")
 
-        if result["format"] == "html":
-            tab_preview, tab_code = st.tabs(["미리보기", "HTML 코드"])
-            with tab_preview:
-                components.html(f"<style>{SKIN_CSS}</style>{result['content']}", height=1000, scrolling=True)
-            with tab_code:
-                st.code(result["content"], language="html")
+            if result["format"] == "html":
+                tab_preview, tab_code = st.tabs(["미리보기", "HTML 코드"])
+                with tab_preview:
+                    components.html(f"<style>{SKIN_CSS}</style>{result['content']}", height=1000, scrolling=True)
+                with tab_code:
+                    st.code(result["content"], language="html")
+            else:
+                st.caption("네이버 스마트에디터에 그대로 붙여넣을 수 있는 순수 텍스트입니다.")
+                st.code(result["content"], language=None)
+
+            if result.get("images"):
+                st.subheader("🖼️ 이미지 생성 프롬프트")
+                st.caption("아래 프롬프트를 Google Flow 등에 붙여넣고, 마음에 드는 이미지를 골라 본문의 같은 번호 자리에 넣어주세요.")
+                for label, prompt in result["images"]:
+                    st.code(f"[{label}] {prompt}", language=None)
         else:
-            st.caption("네이버 스마트에디터에 그대로 붙여넣을 수 있는 순수 텍스트입니다.")
-            st.code(result["content"], language=None)
-
-        if result.get("images"):
-            st.subheader("🖼️ 이미지 생성 프롬프트")
-            st.caption("아래 프롬프트를 Google Flow 등에 붙여넣고, 마음에 드는 이미지를 골라 본문의 같은 번호 자리에 넣어주세요.")
-            for label, prompt in result["images"]:
-                st.code(f"[{label}] {prompt}", language=None)
-    else:
-        st.info("왼쪽에서 플랫폼·유형·주제를 입력하고 생성 버튼을 누르면 결과가 여기에 표시됩니다.")
+            st.info("왼쪽에서 플랫폼·유형·주제를 입력하고 생성 버튼을 누르면 결과가 여기에 표시됩니다.")
 
 
-# ────────────────────────────────────────────────────────────────
-# 배치 생성
-# ────────────────────────────────────────────────────────────────
-st.divider()
-with st.expander("📅 여러 주제 한 번에 생성 (배치)"):
-    st.caption("왼쪽에서 선택한 플랫폼·유형·말투·분량·리서치 설정을 그대로 사용해 순차 생성합니다.")
-    batch_topics_raw = st.text_area(
-        "주제 목록 (한 줄에 하나씩, 최대 30개)", height=180,
-        placeholder="예)\n혈압 낮추는 법\n겨울철 난방비 절약 방법\n무선 청소기 추천\n...",
-        key="batch_topics_raw",
-    )
-    run_batch = st.button("🚀 전체 순차 생성", key="run_batch_button")
+        # ────────────────────────────────────────────────────────────────
+        # 배치 생성
+        # ────────────────────────────────────────────────────────────────
+        st.divider()
+        with st.expander("📅 여러 주제 한 번에 생성 (배치)"):
+            st.caption("왼쪽에서 선택한 플랫폼·유형·말투·분량·리서치 설정을 그대로 사용해 순차 생성합니다.")
+            batch_topics_raw = st.text_area(
+                "주제 목록 (한 줄에 하나씩, 최대 30개)", height=180,
+                placeholder="예)\n혈압 낮추는 법\n겨울철 난방비 절약 방법\n무선 청소기 추천\n...",
+                key="batch_topics_raw",
+            )
+            run_batch = st.button("🚀 전체 순차 생성", key="run_batch_button")
 
-    if run_batch:
-        topics = [t.strip() for t in batch_topics_raw.splitlines() if t.strip()][:30]
-        if not topics:
-            st.error("주제를 한 줄에 하나씩 입력해 주세요.")
-        elif client is None:
-            st.error("Google API 키가 필요합니다.")
-        else:
-            fmt = pcfg["format"]
-            batch_results = []
-            progress = st.progress(0.0, text="시작합니다…")
-            for i, t in enumerate(topics):
-                progress.progress((i) / len(topics), text=f"({i+1}/{len(topics)}) {t} 생성 중…")
-                if i > 0:
-                    time.sleep(4)  # 무료 티어 분당 요청 제한 방지용 대기
-                try:
-                    b_link1 = link1_in.strip()
-                    b_link2 = link2_in.strip() if ccfg["link_mode"] == "dual" else b_link1
-                    if fmt == "html":
-                        if not b_link1:
-                            found, _ = search_official_link(t)
-                            b_link1 = found or "[링크 입력]"
-                        if ccfg["link_mode"] == "dual" and not b_link2:
-                            found, _ = search_official_link(t)
-                            b_link2 = found or "[링크 입력]"
-                    b_link1 = b_link1 or "[링크 입력]"
-                    b_link2 = b_link2 or b_link1
+            if run_batch:
+                topics = [t.strip() for t in batch_topics_raw.splitlines() if t.strip()][:30]
+                if not topics:
+                    st.error("주제를 한 줄에 하나씩 입력해 주세요.")
+                elif client is None:
+                    st.error("Google API 키가 필요합니다.")
+                else:
+                    fmt = pcfg["format"]
+                    batch_results = []
+                    progress = st.progress(0.0, text="시작합니다…")
+                    for i, t in enumerate(topics):
+                        progress.progress((i) / len(topics), text=f"({i+1}/{len(topics)}) {t} 생성 중…")
+                        if i > 0:
+                            time.sleep(4)  # 무료 티어 분당 요청 제한 방지용 대기
+                        try:
+                            b_link1 = link1_in.strip()
+                            b_link2 = link2_in.strip() if ccfg["link_mode"] == "dual" else b_link1
+                            if fmt == "html":
+                                if not b_link1:
+                                    found, _ = search_official_link(t)
+                                    b_link1 = found or "[링크 입력]"
+                                if ccfg["link_mode"] == "dual" and not b_link2:
+                                    found, _ = search_official_link(t)
+                                    b_link2 = found or "[링크 입력]"
+                            b_link1 = b_link1 or "[링크 입력]"
+                            b_link2 = b_link2 or b_link1
 
-                    b_research_block, b_sources = "", []
-                    if use_research and search_ready:
-                        b_research_block, b_sources = research_topic(t)
+                            b_research_block, b_sources = "", []
+                            if use_research and search_ready:
+                                b_research_block, b_sources, _ = research_topic(t)
 
-                    title, meta, tags, content, images, html_repaired = generate_post(
-                        content_key, platform_key, t, b_link1, b_link2, tone_key, length_key, extra.strip(),
-                        b_research_block, st.session_state.get("seo_extra_notes", ""),
-                    )
-                    batch_results.append({
-                        "topic": t, "title": title, "meta": meta, "tags": tags,
-                        "content": content, "format": fmt, "mode": f"{platform_key} · {content_key}",
-                        "images": images, "sources": b_sources, "error": None,
-                    })
-                except Exception as e:
-                    batch_results.append({"topic": t, "error": str(e)})
-            progress.progress(1.0, text="완료!")
-            st.session_state["batch_results"] = batch_results
+                            title, meta, tags, content, images, html_repaired = generate_post(
+                                content_key, platform_key, t, b_link1, b_link2, tone_key, length_key, extra.strip(),
+                                b_research_block, st.session_state.get("seo_extra_notes", ""),
+                            )
+                            batch_results.append({
+                                "topic": t, "title": title, "meta": meta, "tags": tags,
+                                "content": content, "format": fmt, "mode": f"{platform_key} · {content_key}",
+                                "images": images, "sources": b_sources, "error": None,
+                            })
+                        except Exception as e:
+                            batch_results.append({"topic": t, "error": str(e)})
+                    progress.progress(1.0, text="완료!")
+                    st.session_state["batch_results"] = batch_results
 
-    batch_results = st.session_state.get("batch_results")
-    if batch_results:
-        ok_count = sum(1 for r in batch_results if not r.get("error"))
-        st.success(f"{ok_count}/{len(batch_results)}건 생성 완료")
+            batch_results = st.session_state.get("batch_results")
+            if batch_results:
+                ok_count = sum(1 for r in batch_results if not r.get("error"))
+                st.success(f"{ok_count}/{len(batch_results)}건 생성 완료")
 
-        import io
-        import zipfile
+                import io
+                import zipfile
 
-        zip_buf = io.BytesIO()
-        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for idx, r in enumerate(batch_results, 1):
-                if r.get("error"):
-                    continue
-                ext = "html" if r["format"] == "html" else "txt"
-                safe_name = re.sub(r"[\\/:*?\"<>|]", "_", r["title"] or r["topic"])[:60]
-                zf.writestr(f"{idx:02d}_{safe_name}.{ext}", r["content"])
-        st.download_button("⬇️ 전체 결과 ZIP으로 다운로드", data=zip_buf.getvalue(),
-                            file_name="batch_posts.zip", mime="application/zip")
+                zip_buf = io.BytesIO()
+                with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for idx, r in enumerate(batch_results, 1):
+                        if r.get("error"):
+                            continue
+                        ext = "html" if r["format"] == "html" else "txt"
+                        safe_name = re.sub(r"[\\/:*?\"<>|]", "_", r["title"] or r["topic"])[:60]
+                        zf.writestr(f"{idx:02d}_{safe_name}.{ext}", r["content"])
+                st.download_button("⬇️ 전체 결과 ZIP으로 다운로드", data=zip_buf.getvalue(),
+                                    file_name="batch_posts.zip", mime="application/zip")
 
-        for idx, r in enumerate(batch_results, 1):
-            if r.get("error"):
-                st.error(f"{idx}. {r['topic']} — 생성 실패: {r['error']}")
-                continue
-            with st.expander(f"{idx}. [{r['mode']}] {r['title']}"):
-                st.markdown(f"**메타설명** {r['meta']}")
-                tag_chips = " ".join(f"`#{tg.strip()}`" for tg in r["tags"].split(",") if tg.strip())
-                st.markdown(f"**태그** {tag_chips}")
-                if r.get("sources"):
-                    st.caption(f"🔎 리서치 출처 {len(r['sources'])}건 반영됨")
-                st.code(r["content"], language="html" if r["format"] == "html" else None)
-                ext = "html" if r["format"] == "html" else "txt"
-                st.download_button("이 글만 다운로드", data=r["content"],
-                                    file_name=f"{r['title'] or r['topic']}.{ext}", key=f"dl_{idx}")
+                for idx, r in enumerate(batch_results, 1):
+                    if r.get("error"):
+                        st.error(f"{idx}. {r['topic']} — 생성 실패: {r['error']}")
+                        continue
+                    with st.expander(f"{idx}. [{r['mode']}] {r['title']}"):
+                        st.markdown(f"**메타설명** {r['meta']}")
+                        tag_chips = " ".join(f"`#{tg.strip()}`" for tg in r["tags"].split(",") if tg.strip())
+                        st.markdown(f"**태그** {tag_chips}")
+                        if r.get("sources"):
+                            st.caption(f"🔎 리서치 출처 {len(r['sources'])}건 반영됨")
+                        st.code(r["content"], language="html" if r["format"] == "html" else None)
+                        ext = "html" if r["format"] == "html" else "txt"
+                        st.download_button("이 글만 다운로드", data=r["content"],
+                                            file_name=f"{r['title'] or r['topic']}.{ext}", key=f"dl_{idx}")
