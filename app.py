@@ -1,5 +1,6 @@
 import os
 import re
+import base64
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
@@ -326,6 +327,53 @@ def format_research_block(research_text, sources=None):
     return "\n".join(lines)
 
 
+IMAGE_GEN_MODEL = "gemini-2.5-flash-image"
+
+
+def generate_image(client, prompt, model_name=IMAGE_GEN_MODEL):
+    """Gemini의 이미지 생성 모델(Nano Banana)로 실제 사진풍 이미지를 생성.
+    반환: (png bytes, mime type, 에러메시지 or None)"""
+    try:
+        resp = client.models.generate_content(model=model_name, contents=prompt)
+        for part in resp.candidates[0].content.parts:
+            if getattr(part, "inline_data", None) is not None:
+                return part.inline_data.data, part.inline_data.mime_type or "image/png", None
+        return None, None, "이미지 데이터 없음"
+    except Exception as e:
+        return None, None, str(e)
+
+
+def assemble_images_into_content(client, content, images, fmt):
+    """images(=[(label, prompt), ...])를 실제로 생성해서 content의 자리 표시를 실제 이미지로 채운다.
+    html 포맷은 <img> 태그로 직접 치환(별도 CSS 등록 불필요, 인라인 base64).
+    text 포맷(쿠팡파트너스 등)은 본문에 HTML을 넣을 수 없으므로 content는 그대로 두고
+    생성된 이미지 파일들만 별도로 반환해서 수동 업로드하도록 안내한다.
+    반환: (치환된 content, [(label, png bytes, mime), ...] 생성 성공분, [(label, 에러), ...] 실패분)"""
+    generated, errors = [], []
+    for label, prompt in images:
+        data, mime, err = generate_image(client, prompt)
+        if err or not data:
+            errors.append((label, err or "알 수 없는 오류"))
+            continue
+        generated.append((label, data, mime))
+        if fmt == "html":
+            b64 = base64.b64encode(data).decode("utf-8")
+            pattern = (
+                r'<div class="jb-img-slot">🖼️\s*\[' + re.escape(label) +
+                r'\]\s*이 자리에 이미지를 삽입하세요\s*</div>'
+            )
+            img_tag = (
+                f'<img src="data:{mime};base64,{b64}" alt="{label}" '
+                f'style="width:100%;border-radius:16px;display:block;margin:16px 0;" />'
+            )
+            new_content, n = re.subn(pattern, img_tag, content, count=1)
+            if n:
+                content = new_content
+            else:
+                errors.append((label, "본문에서 자리 표시를 찾지 못해 삽입은 건너뜀 (이미지는 생성됨)"))
+    return content, generated, errors
+
+
 def extract_between(text, start_marker, end_marker):
     s = text.find(start_marker)
     if s == -1:
@@ -616,6 +664,13 @@ with col_input:
         help="Gemini의 자체 검색(Grounding)으로 주제를 실제 검색해서 그 결과를 근거로 글을 씁니다.",
         disabled=client is None,
     )
+    use_auto_image = st.checkbox(
+        "🖼️ 이미지도 자동 생성해서 삽입", value=False,
+        help="Gemini의 이미지 생성 모델(Nano Banana)로 각 자리 표시에 맞는 사진을 직접 생성해 본문에 끼워 넣습니다. "
+             "티스토리(HTML) 카테고리는 본문에 바로 삽입되고, 쿠팡파트너스(순수 텍스트)는 파일로만 생성돼요 — "
+             "수동으로 자리에 업로드해야 합니다. 이미지 수만큼 API 호출이 늘어 시간이 좀 더 걸려요.",
+        disabled=client is None,
+    )
 
     generate = st.button("✨ 블로그 글 생성하기", type="primary", use_container_width=True)
 
@@ -664,11 +719,20 @@ with col_output:
                         st.session_state.get("seo_extra_notes", ""),
                     )
                     checks = run_seo_check(mode, cfg, topic.strip(), title, meta, tags, content, images)
+
+                    generated_images, image_errors = [], []
+                    if use_auto_image and images:
+                        with st.spinner(f"이미지 {len(images)}장을 생성하는 중… (시간이 좀 걸려요)"):
+                            content, generated_images, image_errors = assemble_images_into_content(
+                                client, content, images, cfg["format"]
+                            )
+
                     st.session_state["result"] = {
                         "title": title, "meta": meta, "tags": tags,
                         "content": content, "format": cfg["format"], "mode": mode,
                         "checks": checks, "auto_used": auto_used, "images": images,
                         "html_repaired": html_repaired, "research_sources": research_sources,
+                        "generated_images": generated_images, "image_errors": image_errors,
                     }
                 except Exception as e:
                     st.error(f"생성 중 오류가 발생했습니다: {e}")
@@ -715,10 +779,30 @@ with col_output:
             st.caption("네이버 블로그 에디터에 그대로 붙여넣을 수 있는 순수 텍스트입니다.")
             st.code(result["content"], language=None)
 
-        if result.get("images"):
+        if result.get("generated_images"):
+            st.subheader("🖼️ 자동 생성된 이미지")
+            if result["format"] == "html":
+                st.success(f"{len(result['generated_images'])}장을 생성해서 본문에 자동으로 삽입했어요. "
+                           "위 코드/미리보기에 이미 반영돼 있어요.")
+            else:
+                st.info(f"{len(result['generated_images'])}장을 생성했어요. 이 카테고리는 순수 텍스트라 본문에 "
+                        "자동으로 못 넣으니, 아래에서 다운로드해서 네이버 에디터의 같은 번호 자리에 직접 업로드해주세요.")
+            cols = st.columns(min(3, len(result["generated_images"])) or 1)
+            for i, (label, data, mime) in enumerate(result["generated_images"]):
+                with cols[i % len(cols)]:
+                    st.image(data, caption=label, use_container_width=True)
+                    ext = "png" if "png" in mime else "jpg"
+                    st.download_button(f"{label} 다운로드", data=data, file_name=f"{label}.{ext}",
+                                        mime=mime, key=f"dl_img_{label}")
+        if result.get("image_errors"):
+            for label, err in result["image_errors"]:
+                st.warning(f"⚠️ {label}: {err}")
+
+        if result.get("images") and not result.get("generated_images"):
             st.subheader("🖼️ 이미지 생성 프롬프트")
             st.caption("아래 프롬프트를 복사해서 Google Flow(또는 다른 이미지 생성 도구)에 붙여넣고, "
-                       "마음에 드는 이미지를 골라 본문의 같은 번호 [이미지N] 자리에 넣어주세요.")
+                       "마음에 드는 이미지를 골라 본문의 같은 번호 [이미지N] 자리에 넣어주세요. "
+                       "(또는 왼쪽의 '이미지도 자동 생성해서 삽입'을 체크하면 이 과정을 앱이 대신 해줘요.)")
             for label, prompt in result["images"]:
                 st.code(f"[{label}] {prompt}", language=None)
     else:
@@ -743,6 +827,9 @@ with st.expander("📅 여러 주제 한 번에 생성 (배치 — 30일치/1주
         key="batch_topics_raw",
     )
     run_batch = st.button("🚀 전체 순차 생성", key="run_batch_button")
+    if use_auto_image:
+        st.caption("⚠️ 이미지 자동 생성이 켜져 있어요. 주제 수 × 이미지 수만큼 추가 호출이 생겨서 "
+                   "배치가 꽤 오래 걸릴 수 있어요 (쿠팡파트너스는 순수 텍스트라 배치에서는 이미지 자동 삽입을 건너뜁니다).")
 
     if run_batch:
         topics = [t.strip() for t in batch_topics_raw.splitlines() if t.strip()][:30]
@@ -780,6 +867,8 @@ with st.expander("📅 여러 주제 한 번에 생성 (배치 — 30일치/1주
                         client, mode, t, b_link1, b_link2, tone_key, length_key, extra.strip(),
                         b_research_block, st.session_state.get("seo_extra_notes", ""),
                     )
+                    if use_auto_image and images and cfg["format"] == "html":
+                        content, _, _ = assemble_images_into_content(client, content, images, cfg["format"])
                     batch_results.append({
                         "topic": t, "title": title, "meta": meta, "tags": tags,
                         "content": content, "format": cfg["format"], "mode": mode,
