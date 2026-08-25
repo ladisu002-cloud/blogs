@@ -1,4 +1,4 @@
-streamlit>=1.40
-google-generativeai>=0.8
-requests>=2.31
-beautifulsoup4>=4.12
+streamlit
+google-genai
+beautifulsoup4
+requests

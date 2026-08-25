@@ -1,11 +1,10 @@
 import os
 import re
-import time
-import datetime
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from bs4 import BeautifulSoup
 
 # ────────────────────────────────────────────────────────────────
@@ -23,6 +22,7 @@ QUALITY_RULES = (
     "독자를 오도할 수 있으므로, 대신 흔히 겪는 상황에 공감하는 화법으로 신뢰를 쌓으세요."
 )
 
+# 필자 고유 말투 가이드 (조회수 높았던 글 5편 분석 결과 — 모든 카테고리 공통 적용)
 STYLE_GUIDE = (
     "다음은 이 블로그 필자의 고유한 말투이니 반드시 반영하세요: "
     "도입부는 '안녕하세요!' 같은 짧은 인사, 또는 독자의 경험에 공감을 구하는 질문"
@@ -40,11 +40,13 @@ STYLE_GUIDE = (
     "('다음엔 ~해볼게요') 개인차가 있을 수 있다는 담백한 단서를 덧붙이세요."
 )
 
+# 애드센스 광고 자동 삽입 위치 규칙 (html 카테고리 공통)
 AD_SLOT_RULES = (
     "<!--AD_SLOT--> 마커를 정확히 3번, 다른 텍스트로 바꾸지 말고 그대로 출력하세요: "
     "① 도입부 첫 CTA 버튼 바로 다음 ② 두 번째 jb-h2 섹션이 끝난 직후 ③ jb-qa(Q&A) 시작 바로 전."
 )
 
+# 이미지 생성 프롬프트 규칙 (모든 카테고리 공통 — 실제 이미지는 생성하지 않고, 자리 표시 + 영어 프롬프트만 제공)
 IMAGE_PROMPT_RULES = (
     "소제목(섹션) 하나당 이미지 1개씩, 보통 4~6개 정도가 적당합니다. 이미지가 들어가면 좋을 자리마다 "
     "본문에 [이미지1], [이미지2]처럼 번호가 매겨진 자리 표시를 넣고, 그 번호와 정확히 일치하는 영어 이미지 생성 "
@@ -52,93 +54,95 @@ IMAGE_PROMPT_RULES = (
     "프롬프트는 사실적인 사진 스타일로 피사체·구도·조명·분위기를 구체적으로 묘사하세요."
 )
 
-# ────────────────────────────────────────────────────────────────
-# 콘텐츠 유형 — 플랫폼(HTML/텍스트)과 무관한 내용/구조 규칙
-# ────────────────────────────────────────────────────────────────
-CONTENT_TYPES = {
+# 건강정보 등 링크가 없을 수도 있는 카테고리를 위한 동적 CTA 안내는 generate_post에서 상황에 따라 주입한다.
+
+MODE_CONFIG = {
     "지원금/제도": {
+        "format": "html",
         "topic_label": "지원금/제도 이름",
         "topic_placeholder": "예: 청년월세지원",
         "link_mode": "dual",
-        "link1_label": "링크1 · 신청하러 가기 (비우면 자동 검색)",
-        "link2_label": "링크2 · 자격 조회하기 (비우면 자동 검색)",
-        "cta1_text": "신청하러 가기", "cta2_text": "자격 조회하기",
-        "disclosure": None,
-        "trend_hint": "요즘 화제인 정부·지자체 지원금 또는 정책 이름",
-        "base_system": (
+        "link1_label": "버튼1 링크 · 신청하러 가기 (비우면 자동 검색)",
+        "link2_label": "버튼2 링크 · 자격 조회하기 (비우면 자동 검색)",
+        "system": (
             "당신은 20년차 SEO 전문가이자 정부 지원금 정보 콘텐츠 작가입니다. "
             "독자는 해당 지원금 대상 여부가 궁금해서 검색해 들어온 사람입니다. "
             "손실 회피 문구로 도입부를 시작해 관심을 끌고, "
             "신청 방법 → 대상 조건 → 지급 금액/유효기간 → Q&A 순으로 구성하세요. "
             "실제 존재하는 제도라면 사실 관계를 왜곡하지 말고, "
-            "확실하지 않은 수치는 '지자체·연도별로 다를 수 있음'으로 처리하세요."
+            "확실하지 않은 수치는 '지자체·연도별로 다를 수 있음'으로 처리하세요. "
+            "CTA 버튼은 정확히 2번 사용합니다: 첫 번째는 도입부 직후, 링크1로 '신청하러 가기👆' 텍스트. "
+            "두 번째는 Q&A 섹션 바로 다음, 링크2로 '자격 조회하기👆' 텍스트. "
+            + QUALITY_RULES + " " + STYLE_GUIDE + " " + AD_SLOT_RULES + " " + IMAGE_PROMPT_RULES
         ),
     },
     "축제/행사": {
+        "format": "html",
         "topic_label": "축제/행사 이름",
         "topic_placeholder": "예: 직지문화축제",
         "link_mode": "single",
         "link1_label": "공식 홈페이지 링크 (비우면 자동 검색)",
-        "cta1_text": "공식 홈페이지 바로가기", "cta2_text": "공식 홈페이지 바로가기",
-        "disclosure": None,
-        "trend_hint": "이번 달~다음 달 국내에서 열리는 인기 축제·행사",
-        "base_system": (
+        "system": (
             "당신은 20년차 SEO 전문가이자 지역 축제 여행 콘텐츠 작가입니다. "
             "독자는 이 축제에 가볼지 결정하려는 사람입니다. "
             "'핵심 명소'와 '주요 프로그램'은 절대 긴 문단으로 나열하지 말고, "
-            "항목별로 이모지 + 짧은 이름 + 1~2문장 설명 형태의 카드형 목록으로 3~4개씩 작성하세요 "
-            "(형식 규칙에 안내된 카드/목록 표현 방식을 그대로 따르세요). "
-            "그 다음 기본 정보(기간/장소/교통/주차) → 방문 꿀팁 → 함께 즐기면 좋은 다른 행사 순으로 구성하세요."
-        ),
-    },
-    "건강정보": {
-        "topic_label": "건강 주제/키워드",
-        "topic_placeholder": "예: 혈압 낮추는 법",
-        "link_mode": "single",
-        "link1_label": "참고 링크 (선택 — 없으면 CTA 없이 작성)",
-        "cta1_text": "자세히 보기", "cta2_text": "자세히 보기",
-        "disclosure": "health",
-        "trend_hint": "최근 검색량이 오르는 건강·생활습관 관련 주제",
-        "base_system": (
-            "당신은 20년차 SEO 전문가이자 건강 정보 콘텐츠 작가입니다. "
-            "독자는 실생활에서 바로 실천할 수 있는 건강 관리법이 궁금해서 검색해 들어온 사람입니다. "
-            "흔한 오해나 궁금증으로 도입부를 시작하고, 원인/배경 → 실천 방법(단계별 또는 카드형 목록) → "
-            "주의사항 → Q&A 순으로 구성하세요. "
-            "특정 의약품명이나 복용량, 개별 진단/치료를 지시하는 문장은 절대 쓰지 마세요. "
-            "운동·식습관·수면 같은 일반적인 생활습관 정보만 다루고, '~에 도움이 된다고 알려져 있습니다', "
-            "'전문가들은 ~을 권장합니다'처럼 출처를 특정하지 않는 일반론으로 서술하세요. "
-            "실존 여부가 불확실한 특정 연구·논문·저널명을 지어내 인용하지 마세요."
-        ),
-    },
-    "쿠팡파트너스": {
-        "topic_label": "상품/카테고리명",
-        "topic_placeholder": "예: 무선 청소기 추천",
-        "link_mode": "single",
-        "link1_label": "쿠팡 파트너스 링크",
-        "cta1_text": "최저가 확인하기", "cta2_text": "최저가 확인하기",
-        "disclosure": "coupang",
-        "trend_hint": "요즘 잘 팔리는 인기 제품 카테고리",
-        "base_system": (
-            "당신은 20년차 SEO 전문가이자 쿠팡 파트너스 제휴 마케팅 콘텐츠 작가입니다. "
-            "서론(공감 유도 + 링크 자리 1회) → 상품별 분석(장단점을 솔직하게, 스펙 비교 포함) → "
-            "결론(핵심 요약 + 링크 자리 1회) → 자주 묻는 질문 3~5개 → 해시태그/태그 순으로 구성하세요. "
-            "장점만 나열하지 말고 단점이나 이런 분께는 안 맞을 수 있다는 점도 최소 1곳 솔직하게 언급하세요."
+            "반드시 jb-spot-list 카드 목록(아이콘 + 짧은 이름 + 1~2문장 설명)으로 3~4개씩 작성하세요. "
+            "그 다음 기본 정보(기간/장소/교통/주차) → 방문 꿀팁 → 함께 즐기면 좋은 다른 행사 순으로 구성하세요. "
+            "CTA 버튼은 정확히 2번, 같은 링크로 '공식 홈페이지 바로가기👆' 텍스트를 사용하세요. "
+            + QUALITY_RULES + " " + STYLE_GUIDE + " " + AD_SLOT_RULES + " " + IMAGE_PROMPT_RULES
         ),
     },
     "일반 블로그": {
+        "format": "html",
         "topic_label": "주제/키워드",
         "topic_placeholder": "예: 겨울철 난방비 절약 방법",
         "link_mode": "single",
         "link1_label": "참고 링크 (선택)",
-        "cta1_text": "자세히 보기", "cta2_text": "자세히 보기",
-        "disclosure": None,
-        "trend_hint": "요즘 검색량이 오르는 생활정보 주제",
-        "base_system": (
+        "system": (
             "당신은 20년차 SEO 전문가이자 정보성 블로그 작가입니다. "
             "검색 의도에 정확히 부합하는 실용적인 정보를 다루세요. "
-            "핵심 항목이 여러 개 나열되는 부분(방법 목록, 추천 목록 등)은 긴 문단 대신 "
-            "카드형 목록으로 정리하면 가독성이 좋습니다(해당될 때만). "
-            "왜 중요한지(도입) → 핵심 정보/방법을 섹션별로 → 실수하기 쉬운 점(팁) → Q&A 순으로 구성하세요."
+            "핵심 항목이 여러 개 나열되는 부분(예: 방법 목록, 추천 목록)은 긴 문단 대신 "
+            "jb-spot-list 카드 목록으로 정리하면 가독성이 좋습니다(해당될 때만). "
+            "왜 중요한지(도입) → 핵심 정보/방법을 섹션별로 → 실수하기 쉬운 점(팁 박스) → Q&A 순으로 구성하세요. "
+            "CTA 버튼은 정확히 2번, 같은 링크로 '자세히 보기👆' 텍스트를 사용하세요. "
+            + QUALITY_RULES + " " + STYLE_GUIDE + " " + AD_SLOT_RULES + " " + IMAGE_PROMPT_RULES
+        ),
+    },
+    "쿠팡파트너스": {
+        "format": "text",
+        "topic_label": "상품/카테고리명",
+        "topic_placeholder": "예: 무선 청소기 추천",
+        "link_mode": "single",
+        "link1_label": "쿠팡 파트너스 링크",
+        "system": (
+            "당신은 20년차 SEO 전문가이자 쿠팡 파트너스 제휴 마케팅 콘텐츠 작가입니다. "
+            "네이버 블로그에 그대로 붙여넣을 순수 텍스트(HTML 태그 없음)로 작성합니다. "
+            "구조는 서론(공감 유도 + 파트너스 링크 자리 1회) → 상품별 분석(장단점을 솔직하게, "
+            "스펙 비교는 '항목: 설명' 형태의 줄글로) → 결론(핵심 요약 + 링크 자리 1회) → "
+            "자주 묻는 질문 3~5개 → 해시태그 순으로 구성하세요. "
+            "장점만 나열하지 말고 단점이나 이런 분께는 안 맞을 수 있다는 점도 최소 1곳 솔직하게 언급하세요. "
+            "글 맨 앞에는 반드시 '본 포스팅은 쿠팡 파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 "
+            "제공받습니다.'라는 문구를 그대로 포함하세요. " + QUALITY_RULES + " " + STYLE_GUIDE + " " + IMAGE_PROMPT_RULES
+        ),
+    },
+    "건강정보": {
+        "format": "html",
+        "topic_label": "건강 주제/키워드",
+        "topic_placeholder": "예: 혈압 낮추는 법",
+        "link_mode": "single",
+        "link1_label": "참고 링크 (선택 — 없으면 CTA 버튼 없이 작성)",
+        "system": (
+            "당신은 20년차 SEO 전문가이자 건강 정보 콘텐츠 작가입니다. "
+            "독자는 실생활에서 바로 실천할 수 있는 건강 관리법이 궁금해서 검색해 들어온 사람입니다. "
+            "흔한 오해나 궁금증으로 도입부를 시작하고, 원인/배경 → 실천 방법(단계별 또는 리스트, "
+            "jb-spot-list 카드 활용 가능) → 주의사항 → Q&A 순으로 구성하세요. "
+            "특정 의약품명이나 복용량, 개별 진단/치료를 지시하는 문장은 절대 쓰지 마세요. "
+            "운동·식습관·수면 같은 일반적인 생활습관 정보만 다루고, '~에 도움이 된다고 알려져 있습니다', "
+            "'전문가들은 ~을 권장합니다'처럼 출처를 특정하지 않는 일반론으로 서술하세요. "
+            "실존 여부가 불확실한 특정 연구·논문·저널명을 지어내 인용하지 마세요. "
+            "글 맨 끝에는 반드시 '이 글은 일반적인 건강 정보 제공을 목적으로 하며, 개인의 의학적 진단이나 "
+            "치료를 대체하지 않습니다. 증상이 있다면 반드시 전문의와 상담하세요.'라는 문구를 그대로 포함하세요. "
+            + QUALITY_RULES + " " + STYLE_GUIDE + " " + AD_SLOT_RULES + " " + IMAGE_PROMPT_RULES
         ),
     },
 }
@@ -151,12 +155,13 @@ SKIN_CLASSES_DOC = """
 - <div class="jb-h2">섹션 제목</div> : 섹션 제목, 이모지 1개 포함. 분량 목표에 맞춰 4~6개 사용
 - <div class="jb-info">...</div> : 기본정보 요약 카드 (jb-info-row/label/val 조합, 선택)
 - <div class="jb-spot-list"><div class="jb-spot-item"><div class="jb-spot-icon">이모지</div><div class="jb-spot-body"><div class="jb-spot-name">이름</div><div class="jb-spot-desc">1~2문장 설명</div></div></div>...</div>
-  : "카드형 목록"을 요청받으면 이 클래스로 표현 (3~4개 항목)
-- <div class="jb-tip"><b>라벨</b> 설명글</div> : 꿀팁/주의사항/안내 박스 (2~3개)
+  : 명소/프로그램/추천항목 등 나열형 정보를 카드 리스트로 보여줄 때 사용 (3~4개 항목)
+- <div class="jb-tip"><b>라벨</b> 설명글</div> : 꿀팁/주의사항 박스 (2~3개)
 - <div class="jb-table-wrap"><table class="jb-table">...</table></div> : 비교/조건표 (선택)
 - <div class="jb-qa"><div class="jb-qa-item"><div class="jb-qa-q">Q. 질문</div><div class="jb-qa-a">답변</div></div>...</div> : Q&A, 2~3문항
 - <div class="jb-divider">· · ·</div> : 섹션 구분선 (선택)
-- <div class="jb-img-slot">🖼️ [이미지N] 이 자리에 이미지를 삽입하세요</div> : 이미지 자리 표시
+- <div class="jb-img-slot">🖼️ [이미지N] 이 자리에 이미지를 삽입하세요</div>
+  : 이미지가 들어갈 자리 표시 (번호는 실제 이미지 순서와 일치시킬 것)
 - <span class="jb-highlight">강조 텍스트</span> : 본문 강조 inline span
 - 일반 문단은 <p>텍스트</p>
 
@@ -167,23 +172,17 @@ SKIN_CLASSES_DOC = """
 """
 
 TEXT_RULES_DOC = """
-작성 형식 (네이버 스마트에디터용 순수 텍스트):
+작성 형식 (네이버 블로그용 순수 텍스트):
 - HTML 태그, 마크다운 기호(#, *, ``` 등)를 절대 사용하지 말 것
 - 소제목은 줄 앞에 이모지 1개 + 짧은 문구로 표시 (예: "✅ 핵심 스펙 비교")
-- "카드형 목록"을 요청받으면, 항목마다 "이모지 이름" 한 줄 + 바로 아래 설명 한 줄, 항목 사이는 빈 줄로 구분
 - 표가 필요하면 "항목: 설명" 형태로 한 줄씩 나열
 - 문단 사이는 빈 줄 하나로 구분
 - 이미지가 들어갈 자리는 줄 단독으로 "[이미지1]"처럼 표시
-- CTA/링크를 넣을 자리는 반드시 아래 형식 그대로 표시:
-  👉 [문구] → LINK
+- 링크를 넣을 자리는 반드시 아래 형식 그대로 표시:
+  🛒 [상품명] 최저가 확인하기 → LINK
 - 본문 분량 목표에 맞춰 충분히 작성하고, 마지막에 반드시 ###END### 까지 도달할 것 (중간에 끊지 말 것)
 - 코드펜스나 설명 문구 없이, 지정된 마커 형식으로만 응답할 것
 """
-
-PLATFORMS = {
-    "티스토리 (HTML)": {"format": "html", "rules_doc": SKIN_CLASSES_DOC, "extra_rules": AD_SLOT_RULES},
-    "네이버 (텍스트)": {"format": "text", "rules_doc": TEXT_RULES_DOC, "extra_rules": ""},
-}
 
 SKIN_CSS = """
 .jb-post{font-family:'Pretendard',-apple-system,sans-serif;color:#212832;font-size:16px;line-height:1.85;max-width:720px;margin:0 auto;padding:26px 22px 40px;}
@@ -246,158 +245,85 @@ def get_client():
         api_key = st.session_state.get("manual_api_key", "")
     if not api_key:
         return None
-    genai.configure(api_key=api_key)
-    return genai
+    return genai.Client(api_key=api_key)
 
 
-# ────────────────────────────────────────────────────────────────
-# 웹 리서치 — Gemini 내장 구글 검색 연동(grounding). 별도 API 등록 불필요.
-# ────────────────────────────────────────────────────────────────
-def _extract_grounding_sources(response):
-    sources = []
+DEFAULT_RESEARCH_MODEL = "gemini-flash-latest"
+
+
+def grounded_search(client, query, model_name=DEFAULT_RESEARCH_MODEL):
+    """Gemini의 Google Search Grounding으로 실제 웹검색 결과를 근거로 답변과 출처 링크를 받아온다.
+    별도의 Custom Search 설정 없이, 이미 쓰고 있는 GOOGLE_API_KEY 하나로 동작한다.
+    반환: (응답 텍스트, 출처 리스트[{title, link}], 에러메시지 or None)"""
     try:
-        gm = getattr(response.candidates[0], "grounding_metadata", None)
-        if not gm:
-            return sources
-        for ch in (getattr(gm, "grounding_chunks", None) or []):
-            web = getattr(ch, "web", None)
-            if web and getattr(web, "uri", ""):
-                sources.append({"title": getattr(web, "title", "") or web.uri, "link": web.uri})
-    except Exception:
-        pass
-    return sources
+        config = types.GenerateContentConfig(
+            tools=[types.Tool(google_search=types.GoogleSearch())],
+            temperature=0.3,
+        )
+        resp = client.models.generate_content(model=model_name, contents=query, config=config)
+        text = resp.text or ""
+        sources = []
+        try:
+            gm = resp.candidates[0].grounding_metadata
+            for c in (gm.grounding_chunks or []):
+                web = getattr(c, "web", None)
+                if web and getattr(web, "uri", None):
+                    sources.append({"title": getattr(web, "title", "") or web.uri, "link": web.uri})
+        except Exception:
+            pass
+        return text, sources, None
+    except Exception as e:
+        return "", [], str(e)
 
 
-def _grounded_call(prompt, model_name="gemini-flash-latest", max_output_tokens=1200):
-    """반환값: (텍스트, 출처리스트, grounded 여부). grounded=False면 실시간 검색이 아니라
-    모델의 기존 학습 지식만으로 답한 것이므로, 오래된 정보일 위험이 있다는 뜻이다."""
-    today = datetime.date.today().isoformat()
-    dated_prompt = (
-        f"[오늘 날짜: {today}] 이 날짜 기준 최신 정보만 답하고, 지난 연도(예: 2024, 2025년)의 "
-        f"행사·정보를 올해 것처럼 제시하지 마. 검색으로 확인 못 하면 '최신 정보를 확인하지 못했다'고 답해.\n\n"
-        + prompt
+def search_official_link(client, query):
+    """Grounding으로 공식 홈페이지 링크 하나를 찾는다. (link, error) 반환."""
+    text, sources, err = grounded_search(
+        client, f"{query} 공식 홈페이지 URL을 검색해서 정확한 링크 하나만 알려줘. 다른 설명 없이 URL만 출력해."
     )
-    tool_variants = [{"google_search": {}}], "google_search_retrieval", None
-    thinking_variants = (0, None)
-    for tools in tool_variants:
-        for tb in thinking_variants:
-            try:
-                model = genai.GenerativeModel(model_name, tools=tools) if tools else genai.GenerativeModel(model_name)
-                gen_kwargs = {"max_output_tokens": max_output_tokens, "temperature": 0.4}
-                if tb is not None:
-                    gen_kwargs["thinking_config"] = genai.types.ThinkingConfig(thinking_budget=tb)
-                resp = model.generate_content(dated_prompt, generation_config=genai.types.GenerationConfig(**gen_kwargs))
-                if resp and resp.text and resp.text.strip():
-                    sources = _extract_grounding_sources(resp) if tools else []
-                    grounded = bool(tools) and bool(sources)
-                    return resp.text.strip(), sources, grounded
-            except Exception:
-                continue
-    return "", [], False
-
-
-def search_official_link(query):
-    text, sources, grounded = _grounded_call(
-        f"'{query}'의 공식 웹사이트 또는 공식 신청 페이지 URL을 정확히 찾아서 URL만 한 줄로 답해줘. "
-        f"설명 문구 없이 URL만 출력해.",
-        max_output_tokens=200,
-    )
+    if err:
+        return None, err
     if sources:
         return sources[0]["link"], None
-    m = re.search(r"https?://[^\s\"'<>]+", text)
-    return (m.group(0), None) if m else (None, "검색 결과 없음")
+    m = re.search(r"https?://\S+", text)
+    if m:
+        return m.group(0).rstrip(".,)"), None
+    return None, "검색 결과 없음"
 
 
-def research_topic(topic, max_results=5):
-    prompt = f"""'{topic}'에 대해 구글 검색을 활용해 다음을 조사해줘:
-1. 사람들이 실제로 많이 검색할 만한 세부 키워드(연관 검색어) 5~8개
-2. 그중 경쟁이 상대적으로 약해 보이는 키워드 우선순위
-3. 이 주제에 대해 검색으로 확인 가능한 핵심 정보(수치·조건·절차 등, 최신 기준)를 간결하게 요약
-
-확인되지 않은 내용은 지어내지 말고, 검색으로 실제 확인한 내용 위주로 정리해줘.
-한국어로, 800자 이내로 간결하게."""
-    text, sources, grounded = _grounded_call(prompt, max_output_tokens=1400)
-    if not text:
-        return "", [], False
-    block = (
-        "다음은 이 주제에 대해 웹 검색으로 실제 조사한 리서치 자료입니다. "
-        "이 자료의 사실 관계를 우선순위로 삼아 작성하고, 여기 없는 내용을 사실처럼 지어내지 마세요:\n" + text
-    )
-    return block, sources, grounded
-
-
-def research_seo_rules(platform_hint):
+def research_topic(client, topic, model_name=DEFAULT_RESEARCH_MODEL):
+    """주제를 웹에서 리서치해서 (연구 요약 텍스트, 출처 리스트, 에러) 반환.
+    이 결과가 writer 단계의 리서치 자료가 되어, 확인 안 된 내용을 지어내지 않도록 근거를 제공한다."""
     prompt = (
-        f"{platform_hint} 블로그의 2026년 기준 최신 SEO 상위노출 규칙을 구글 검색으로 조사해줘. "
-        f"제목 규칙, 본문 구조·분량, 키워드 밀도·위치, 이미지 개수, 해시태그, 저품질/금지 패턴을 "
-        f"항목별로 간결하게 정리해줘. 확인 안 된 내용은 지어내지 마. 한국어로 700자 이내."
+        f"'{topic}'에 대해 블로그 글을 쓰려고 해. 최신 웹 정보를 검색해서 "
+        "핵심 사실을 4~6가지 항목으로 간단히 정리해줘. 각 항목은 한두 문장으로, "
+        "수치나 날짜, 조건처럼 정확해야 하는 정보는 검색 결과에 있는 것만 사용하고 지어내지 마."
     )
-    return _grounded_call(prompt, max_output_tokens=1200)
+    return grounded_search(client, prompt, model_name)
 
 
-def suggest_trending_topics(content_key, count=8):
-    hint = CONTENT_TYPES[content_key]["trend_hint"]
-    prompt = f"""요즘({hint}) 관련해서 사람들이 실제로 많이 검색하는 주제나 키워드를
-검색 결과를 바탕으로 {count}개 뽑아줘. 블로그 글 주제로 바로 쓸 수 있는 짧은 명사구로,
-번호·설명·부가문구 없이 한 줄에 하나씩만 출력해."""
-    text, sources, grounded = _grounded_call(prompt, max_output_tokens=900)
-    if not text:
-        return [], [], False
-    keywords = [re.sub(r"^[\-\•\d\.\)\s]+", "", line).strip() for line in text.splitlines() if line.strip()]
-    return [k for k in keywords if k][:count], sources, grounded
+def research_seo_rules(client, platform_hint):
+    """네이버/티스토리 등 플랫폼의 최신 상위노출 규칙을 웹에서 검색해서 근거자료로 반환.
+    검색 규칙은 계속 바뀌므로, 이 함수로 그때그때 다시 검색해 반영할 수 있다."""
+    query = (
+        f"{platform_hint} 블로그 상위노출 SEO 규칙 최신 기준을 검색해서 알려줘. "
+        "제목 글자수, 본문 분량, 키워드 배치, 이미지 개수, 태그, 저품질/금지 패턴 등 핵심만 정리해줘."
+    )
+    return grounded_search(client, query)
 
 
-def datalab_ready():
-    cid = st.secrets.get("NAVER_CLIENT_ID", None) or os.environ.get("NAVER_CLIENT_ID")
-    csec = st.secrets.get("NAVER_CLIENT_SECRET", None) or os.environ.get("NAVER_CLIENT_SECRET")
-    return bool(cid and csec)
-
-
-def verify_with_datalab(keywords, days=30):
-    """네이버 데이터랩 검색어트렌드 API로 후보 키워드들의 상대 검색량을 비교해 순위를 매긴다.
-    실시간 급상승 검색어는 제공되지 않으므로(2021년 서비스 종료), '발굴'이 아니라 '검증' 용도로만 쓴다.
-    한 번에 최대 5개까지만 비교 가능하다(네이버 API 제한). NAVER_CLIENT_ID/SECRET이 없으면 (None, '미설정')."""
-    cid = st.secrets.get("NAVER_CLIENT_ID", None) or os.environ.get("NAVER_CLIENT_ID")
-    csec = st.secrets.get("NAVER_CLIENT_SECRET", None) or os.environ.get("NAVER_CLIENT_SECRET")
-    if not cid or not csec or not keywords:
-        return None, "미설정"
-    end = datetime.date.today()
-    start = end - datetime.timedelta(days=days)
-    groups = [{"groupName": kw[:20], "keywords": [kw]} for kw in keywords[:5]]
-    try:
-        resp = requests.post(
-            "https://openapi.naver.com/v1/datalab/search",
-            headers={"X-Naver-Client-Id": cid, "X-Naver-Client-Secret": csec, "Content-Type": "application/json"},
-            json={"startDate": start.isoformat(), "endDate": end.isoformat(), "timeUnit": "date", "keywordGroups": groups},
-            timeout=10,
-        )
-        results = resp.json().get("results", [])
-        scored = []
-        for r in results:
-            vals = [p.get("ratio", 0) for p in r.get("data", [])]
-            avg = sum(vals) / len(vals) if vals else 0
-            scored.append({"keyword": r.get("title", ""), "score": round(avg, 1)})
-        return scored, None
-    except Exception as e:
-        return None, str(e)
-
-
-def verify_with_datalab_all(keywords, days=30):
-    """keywords 전체(개수 제한 없음)를 5개씩 나눠서 verify_with_datalab을 반복 호출하고,
-    하나로 합쳐서 검색량 기준 내림차순 정렬한 전체 순위 리스트를 반환한다.
-    일부 묶음이 실패해도 나머지는 그대로 반환하고, 검증 실패한 키워드는 unscored로 따로 담는다."""
-    if not keywords:
-        return [], []
-    scored_all, unscored = [], []
-    for i in range(0, len(keywords), 5):
-        chunk = keywords[i:i + 5]
-        result, err = verify_with_datalab(chunk, days)
-        if result:
-            scored_all.extend(result)
-        else:
-            unscored.extend(chunk)
-    scored_all.sort(key=lambda x: x["score"], reverse=True)
-    return scored_all, unscored
+def format_research_block(research_text, sources=None):
+    """research_topic() 결과를 writer 프롬프트에 그대로 넣을 수 있는 텍스트 블록으로 변환."""
+    if not research_text:
+        return ""
+    lines = [
+        "다음은 이 주제에 대해 웹 검색으로 실제 확인한 리서치 요약입니다. "
+        "이 내용을 우선순위로 삼아 작성하고, 여기 없는 내용을 사실처럼 지어내지 마세요:",
+        research_text,
+    ]
+    if sources:
+        lines.append("참고 출처: " + ", ".join(s["link"] for s in sources[:5]))
+    return "\n".join(lines)
 
 
 def extract_between(text, start_marker, end_marker):
@@ -409,38 +335,23 @@ def extract_between(text, start_marker, end_marker):
     return (text[frm:] if e == -1 else text[frm:e]).strip()
 
 
-def _insert_after_post_open(content, snippet):
-    m = re.search(r'<div class="jb-post"[^>]*>', content)
-    return content[:m.end()] + snippet + content[m.end():] if m else snippet + content
-
-
-def _insert_before_last_close(content, snippet):
-    idx = content.rfind("</div>")
-    return content[:idx] + snippet + content[idx:] if idx != -1 else content + snippet
-
-
-def generate_post(content_key, platform_key, topic, link1, link2, tone_key, length_key, extra,
-                   research_block="", seo_notes=""):
-    ccfg = CONTENT_TYPES[content_key]
-    pcfg = PLATFORMS[platform_key]
-    fmt = pcfg["format"]
+def generate_post(client, mode, topic, link1, link2, tone_key, length_key, extra, research_block="", seo_notes=""):
+    cfg = MODE_CONFIG[mode]
     tone = TONE_OPTIONS[tone_key]
     length = LENGTH_OPTIONS[length_key]
+    rules_doc = SKIN_CLASSES_DOC if cfg["format"] == "html" else TEXT_RULES_DOC
 
-    system = ccfg["base_system"] + " " + QUALITY_RULES + " " + STYLE_GUIDE + " " + pcfg["extra_rules"] + " " + IMAGE_PROMPT_RULES
-
-    link_desc = f"링크1: {link1}" if ccfg["link_mode"] == "single" else f"링크1(신청): {link1}\n링크2(자격조회): {link2}"
+    link_desc = f"링크1: {link1}" if cfg["link_mode"] == "single" else f"링크1(신청): {link1}\n링크2(자격조회): {link2}"
     has_real_link = link1 != "[링크 입력]"
-    if not has_real_link:
-        cta_note = "이번 글에는 실제 링크가 없으므로 CTA를 아예 넣지 마세요."
-    elif ccfg["link_mode"] == "dual":
-        cta_note = f"CTA는 2번 사용: 첫 번째는 링크1로 '{ccfg['cta1_text']}' 문구, 두 번째는 링크2로 '{ccfg['cta2_text']}' 문구."
-    else:
-        cta_note = f"CTA는 2번 모두 같은 링크로 '{ccfg['cta1_text']}' 문구를 사용하세요."
+    cta_note = (
+        "링크가 준비되어 있으니 시스템 지침대로 CTA 버튼을 사용하세요."
+        if has_real_link else
+        "이번 글에는 실제 링크가 없으므로 jb-cta-wrap/jb-cta 버튼을 아예 넣지 마세요."
+    )
 
     user_prompt = f"""
 주제: {topic}
-콘텐츠 유형: {content_key} / 플랫폼: {platform_key}
+카테고리: {mode}
 {link_desc}
 CTA 안내: {cta_note}
 말투: {tone}
@@ -449,7 +360,7 @@ CTA 안내: {cta_note}
 {f"추가 SEO 규칙 메모(최신 검색 기반, 반드시 반영): {seo_notes}" if seo_notes.strip() else ""}
 {research_block}
 
-{pcfg["rules_doc"]}
+{rules_doc}
 
 응답은 아래 마커 형식을 정확히 지켜 작성하세요 (마커 앞뒤 다른 텍스트 금지):
 ###TITLE###
@@ -459,18 +370,26 @@ CTA 안내: {cta_note}
 ###TAGS###
 (쉼표로 구분한 태그 5~7개)
 ###CONTENT###
-(완성된 본문 — html이면 jb-post로 시작하는 HTML, text이면 순수 텍스트)
+(완성된 본문 — html 카테고리는 jb-post로 시작하는 HTML, text 카테고리는 순수 텍스트)
 ###IMAGES###
 ([이미지N] 영어 프롬프트 형식으로 한 줄씩, 본문의 자리 표시 번호와 일치)
 ###END###
 """
 
     def call_model(model_name, thinking_budget):
-        model = genai.GenerativeModel(model_name, system_instruction=system)
-        gen_kwargs = {"max_output_tokens": 8192, "temperature": 0.8}
+        gen_kwargs = {
+            "system_instruction": cfg["system"],
+            "max_output_tokens": 8192,
+            "temperature": 0.8,
+        }
         if thinking_budget is not None:
-            gen_kwargs["thinking_config"] = genai.types.ThinkingConfig(thinking_budget=thinking_budget)
-        resp = model.generate_content(user_prompt, generation_config=genai.types.GenerationConfig(**gen_kwargs))
+            # 최신 Gemini 모델은 기본적으로 '생각(thinking)' 토큰을 먼저 쓴다.
+            # 완전히 0으로 끄면 다중 조건 준수(키워드 배치·구조·분량)의 품질이 떨어질 수 있어
+            # 소량만 남겨두고, 그래도 모자라면 0으로, 그래도 안 되면 필드 자체를 빼고 재시도한다.
+            gen_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
+        resp = client.models.generate_content(
+            model=model_name, contents=user_prompt, config=types.GenerateContentConfig(**gen_kwargs)
+        )
         return resp.text
 
     raw, best = None, None
@@ -484,7 +403,7 @@ CTA 안내: {cta_note}
                 continue
             if best is None or len(candidate) > len(best):
                 best = candidate
-            if "###END###" in candidate:
+            if "###END###" in candidate:  # 마커까지 도달했는지로 '완결' 여부를 실제 확인
                 raw = candidate
                 break
         if raw:
@@ -492,7 +411,7 @@ CTA 안내: {cta_note}
     if not raw:
         if not best:
             raise RuntimeError("모델 응답을 받지 못했습니다. 잠시 후 다시 시도해 주세요.")
-        raw = best
+        raw = best  # 완결 마커는 없지만 그나마 가장 긴 응답으로 대체 (아래에서 안전하게 파싱)
 
     title = extract_between(raw, "###TITLE###", "###META###")
     meta = extract_between(raw, "###META###", "###TAGS###")
@@ -506,23 +425,20 @@ CTA 안내: {cta_note}
     images_raw = extract_between(raw, "###IMAGES###", "###END###") if "###IMAGES###" in raw else ""
     images = re.findall(r"\[(이미지\d+)\]\s*(.+)", images_raw)
 
-    if ccfg["disclosure"] == "coupang" and DISCLOSURE_TEXT not in content:
-        if fmt == "html":
-            content = _insert_after_post_open(content, f'<div class="jb-tip"><b>안내</b> {DISCLOSURE_TEXT}</div>')
-        else:
-            content = DISCLOSURE_TEXT + "\n\n" + content
-    if ccfg["disclosure"] == "health" and HEALTH_DISCLAIMER not in content:
-        if fmt == "html":
-            content = _insert_before_last_close(content, f'<div class="jb-tip"><b>안내</b> {HEALTH_DISCLAIMER}</div>')
-        else:
-            content = content.rstrip() + f"\n\n{HEALTH_DISCLAIMER}"
+    if mode == "쿠팡파트너스" and DISCLOSURE_TEXT not in content:
+        content = DISCLOSURE_TEXT + "\n\n" + content
+    if mode == "건강정보" and HEALTH_DISCLAIMER not in content:
+        content += f'<div class="jb-tip"><b>안내</b> {HEALTH_DISCLAIMER}</div>'
 
+    # 애드센스 광고 자동 삽입 (html 카테고리만 해당)
     html_repaired = False
-    if fmt == "html":
+    if cfg["format"] == "html":
         ad_code = st.session_state.get("adsense_code", "").strip()
         replacement = f'<div class="jb-ad-slot">{ad_code}</div>' if ad_code else ""
         content = content.replace("<!--AD_SLOT-->", replacement)
 
+        # 태그 균형 자동 보정: 모델이 가끔 div를 안 닫아서, Tistory가 이걸 다시 파싱할 때
+        # 이후 내용(이미지 자리 포함)이 엉뚱한 위치로 밀려나는 문제를 방지한다.
         pre_open, pre_close = content.count("<div"), content.count("</div>")
         html_repaired = pre_open != pre_close
         try:
@@ -533,31 +449,43 @@ CTA 안내: {cta_note}
     return title, meta, tags, content, images, html_repaired
 
 
-def run_seo_check(content_key, fmt, topic, title, meta, tags, content, images):
-    ccfg = CONTENT_TYPES[content_key]
+def run_seo_check(mode, cfg, topic, title, meta, tags, content, images):
     checks = []
     plain = re.sub(r"<[^>]+>", " ", content)
 
     kw_count = plain.lower().count(topic.lower()) + title.lower().count(topic.lower())
-    checks.append(("키워드 반복", "ok" if 5 <= kw_count <= 12 else ("warn" if kw_count > 0 else "bad"),
-                   f"'{topic}' {kw_count}회 등장 (목표 5~7회)"))
-    checks.append(("제목 길이/키워드", "ok" if len(title) <= 32 and topic.lower() in title.lower() else "warn",
-                   f"{len(title)}자, 키워드 포함 {'✔' if topic.lower() in title.lower() else '✘'}"))
-    checks.append(("메타설명 길이", "ok" if 40 <= len(meta) <= 100 else "warn", f"{len(meta)}자 (목표 40~100자)"))
+    checks.append((
+        "키워드 반복", "ok" if 5 <= kw_count <= 12 else ("warn" if kw_count > 0 else "bad"),
+        f"'{topic}' {kw_count}회 등장 (목표 5~7회, 분량이 길면 다소 더 많아도 무방)",
+    ))
+    checks.append((
+        "제목 길이/키워드", "ok" if len(title) <= 32 and topic.lower() in title.lower() else "warn",
+        f"{len(title)}자, 키워드 포함 {'✔' if topic.lower() in title.lower() else '✘'}",
+    ))
+    checks.append((
+        "메타설명 길이", "ok" if 40 <= len(meta) <= 100 else "warn",
+        f"{len(meta)}자 (목표 40~100자)",
+    ))
     tag_count = len([t for t in tags.split(",") if t.strip()])
-    checks.append(("태그 개수", "ok" if 5 <= tag_count <= 8 else "warn", f"{tag_count}개 (목표 5~7개)"))
+    checks.append((
+        "태그 개수", "ok" if 5 <= tag_count <= 8 else "warn",
+        f"{tag_count}개 (목표 5~7개)",
+    ))
 
     sentences = re.split(r"(?<=[.!?다요])\s+", plain)
     long_ratio = sum(1 for s in sentences if len(s.strip()) > 55) / max(len(sentences), 1)
-    checks.append(("모바일 문장 길이", "ok" if long_ratio < 0.25 else "warn", f"55자 초과 문장 비율 {long_ratio:.0%}"))
+    checks.append((
+        "모바일 문장 길이", "ok" if long_ratio < 0.25 else "warn",
+        f"55자 초과 문장 비율 {long_ratio:.0%}",
+    ))
 
-    if fmt == "html":
+    if cfg["format"] == "html":
         h2_count = content.count("jb-h2")
         checks.append(("소제목 개수", "ok" if 4 <= h2_count <= 7 else "warn", f"jb-h2 {h2_count}개"))
         cta_count = content.count("jb-cta\"")
         checks.append(("CTA 버튼", "ok" if cta_count >= 2 else "warn", f"{cta_count}회 등장 (목표 2회)"))
         checks.append(("Q&A 포함", "ok" if "jb-qa" in content else "warn", "포함" if "jb-qa" in content else "미포함"))
-        if content_key == "축제/행사":
+        if mode == "축제/행사":
             spot_count = content.count("jb-spot-item")
             checks.append(("명소/프로그램 카드", "ok" if spot_count >= 3 else "warn", f"jb-spot-item {spot_count}개"))
         ad_code = st.session_state.get("adsense_code", "").strip()
@@ -566,23 +494,27 @@ def run_seo_check(content_key, fmt, topic, title, meta, tags, content, images):
             checks.append(("애드센스 삽입", "ok" if ad_count >= 2 else "warn", f"{ad_count}곳 삽입 (목표 3곳)"))
     else:
         link_count = content.count("→")
-        checks.append(("링크 자리 표시", "ok" if link_count >= 1 else "warn", f"{link_count}회 등장"))
+        checks.append(("링크 자리 표시", "ok" if link_count >= 2 else "warn", f"{link_count}회 등장 (목표 2회)"))
         checks.append(("FAQ 포함", "ok" if content.count("?") >= 3 else "warn", f"물음표 {content.count('?')}개"))
-
-    if ccfg["disclosure"] == "coupang":
-        checks.append(("파트너스 고지 문구", "ok" if DISCLOSURE_TEXT in content else "bad",
-                        "포함" if DISCLOSURE_TEXT in content else "누락 — 자동 보정됨"))
-    if ccfg["disclosure"] == "health":
-        checks.append(("건강정보 고지 문구", "ok" if HEALTH_DISCLAIMER in content else "bad",
-                        "포함" if HEALTH_DISCLAIMER in content else "누락 — 자동 보정됨"))
+        if mode == "쿠팡파트너스":
+            checks.append(("파트너스 고지 문구", "ok" if DISCLOSURE_TEXT in content else "bad",
+                            "포함" if DISCLOSURE_TEXT in content else "누락 — 자동 보정됨"))
+        if mode == "건강정보":
+            checks.append(("건강정보 고지 문구", "ok" if HEALTH_DISCLAIMER in content else "bad",
+                            "포함" if HEALTH_DISCLAIMER in content else "누락 — 자동 보정됨"))
 
     slot_count = len(re.findall(r"\[이미지\d+\]", content))
-    checks.append(("이미지 자리/프롬프트 매칭", "ok" if slot_count > 0 and slot_count == len(images) else "warn",
-                   f"본문 자리 {slot_count}개 / 프롬프트 {len(images)}개"))
+    checks.append((
+        "이미지 자리/프롬프트 매칭", "ok" if slot_count > 0 and slot_count == len(images) else "warn",
+        f"본문 자리 {slot_count}개 / 프롬프트 {len(images)}개",
+    ))
 
     char_count = len(re.sub(r"\s+", "", plain))
-    checks.append(("본문 글자수", "ok" if char_count >= 1400 else "warn",
-                   f"공백 제외 약 {char_count}자 (SEO 상 3,000자 이상 권장)"))
+    checks.append((
+        "본문 글자수", "ok" if char_count >= 1400 else "warn",
+        f"공백 제외 약 {char_count}자 (SEO 상 3,000자 이상 권장, '짧게' 선택 시 1,500자 이상)",
+    ))
+
     return checks
 
 
@@ -590,7 +522,7 @@ def run_seo_check(content_key, fmt, topic, title, meta, tags, content, images):
 # UI
 # ────────────────────────────────────────────────────────────────
 st.title("📝 포스트팩토리 — SEO 블로그 자동작성")
-st.caption("플랫폼(티스토리 HTML / 네이버 텍스트) × 유형(지원금·축제·건강정보·쿠팡파트너스·일반)을 조합해 생성합니다")
+st.caption("지원금 · 축제 · 일반 · 건강정보(티스토리 HTML) + 쿠팡파트너스(네이버 텍스트)를 자동 생성합니다")
 
 client = get_client()
 if client is None:
@@ -603,373 +535,298 @@ if client is None:
         )
     client = get_client()
 
-search_ready = client is not None
-
 with st.sidebar:
     st.caption("🆓 Gemini Flash 무료 티어 사용 중 (모델은 Google이 자동으로 최신 버전 유지)")
     st.divider()
 
-    st.subheader("📢 애드센스 자동 삽입 (티스토리 전용, 선택)")
+    st.subheader("📢 애드센스 자동 삽입 (선택)")
     default_ad = st.secrets.get("ADSENSE_CODE", "") if hasattr(st, "secrets") else ""
     st.session_state["adsense_code"] = st.text_area(
         "애드센스 광고 코드 (ins/script 태그 그대로 붙여넣기)",
-        value=st.session_state.get("adsense_code", default_ad), height=100,
-        help="비워두면 광고 없이 생성됩니다. 티스토리(HTML) 글에만 적용되며, "
+        value=st.session_state.get("adsense_code", default_ad),
+        height=100,
+        help="비워두면 광고 없이 생성됩니다. 티스토리(HTML) 카테고리에만 적용되며, "
              "도입부 CTA 직후·본문 중간·Q&A 직전 3곳에 자동으로 들어갑니다.",
     )
-    st.caption("⚠️ 미리보기(iframe)에서는 실제 광고가 안 뜰 수 있어요 — 정상입니다.")
+    st.caption("⚠️ 미리보기 화면(iframe)에서는 실제 광고가 안 뜰 수 있어요 — 정상입니다. "
+               "실제 티스토리에 붙여넣으면 정상 노출됩니다.")
 
     st.divider()
-    st.subheader("🔎 웹 리서치 / 공식 링크 자동 검색")
-    if search_ready:
-        st.success("사용 가능 — Gemini 내장 구글 검색 연동. 별도 등록 불필요.")
-    else:
-        st.caption("GOOGLE_API_KEY만 설정되면 자동으로 사용 가능합니다.")
-
-    st.divider()
-    st.subheader("📊 데이터랩 키워드 검증 (선택)")
-    if datalab_ready():
-        st.success("사용 가능 — 추천 키워드를 실제 검색량 기준으로 검증합니다.")
-    else:
-        st.caption(
-            "인기 키워드 추천에 실제 검색량 검증을 더하려면 네이버 오픈 API를 등록하세요 (무료):\n\n"
-            "1. developers.naver.com → Application 등록 → '검색어트렌드(데이터랩)' API 선택\n"
-            "2. 발급된 Client ID / Client Secret 확인\n"
-            "3. Streamlit Secrets에 NAVER_CLIENT_ID, NAVER_CLIENT_SECRET 등록\n\n"
-            "⚠️ 참고: 데이터랩은 '지금 뜨는 검색어'를 새로 찾아주는 게 아니라, "
-            "이미 뽑힌 후보 키워드들의 상대적 검색량을 비교해주는 용도입니다 "
-            "(네이버는 2021년에 실시간 급상승검색어 서비스 자체를 종료했어요)."
-        )
+    st.subheader("🔎 공식 링크 자동 검색 (선택)")
+    st.success("Gemini 자체 검색(Grounding)으로 동작합니다 — 별도 설정 없이 링크를 비워두면 자동으로 채워집니다.")
 
     st.divider()
     st.subheader("📈 검색 규칙(SEO) 새로고침 (선택)")
-    platform_hint_sb = st.selectbox("검색 대상 플랫폼", ["네이버", "티스토리"], key="seo_refresh_platform")
-    if st.button("🔎 최신 SEO 규칙 검색", disabled=not search_ready):
+    st.caption("네이버·티스토리 상위노출 규칙은 계속 바뀌므로, 필요할 때 웹에서 다시 검색해 아래 노트에 반영하세요. "
+               "저장한 노트는 앞으로 생성되는 모든 글의 시스템 규칙에 자동으로 추가됩니다.")
+    platform_hint = st.selectbox("검색 대상 플랫폼", ["네이버", "티스토리"], key="seo_refresh_platform")
+    if st.button("🔎 최신 SEO 규칙 검색", disabled=client is None):
         with st.spinner("검색 중…"):
-            text, sources, grounded = research_seo_rules(platform_hint_sb)
-        if text:
-            st.session_state["seo_refresh_text"] = text
-            st.session_state["seo_refresh_sources"] = sources
-            st.session_state["seo_refresh_grounded"] = grounded
-        else:
-            st.warning("검색 결과를 가져오지 못했습니다.")
+            text, sources, err = research_seo_rules(client, platform_hint)
+        st.session_state["seo_refresh_text"] = text
+        st.session_state["seo_refresh_sources"] = sources
+        if err and not text:
+            st.warning(f"검색 실패: {err}")
+    if client is None:
+        st.caption("⚠️ 이 기능도 위의 Google API 키 등록이 필요합니다.")
     if st.session_state.get("seo_refresh_text"):
-        if not st.session_state.get("seo_refresh_grounded"):
-            st.warning("⚠️ 실시간 검색 연동이 되지 않아 모델의 기존 지식으로 답한 결과예요 — 최신이 아닐 수 있습니다.")
         st.markdown(st.session_state["seo_refresh_text"])
-        for r in st.session_state.get("seo_refresh_sources", []):
-            st.caption(f"출처: [{r['title']}]({r['link']})")
+        for s in st.session_state.get("seo_refresh_sources", []):
+            st.caption(f"출처: [{s['title']}]({s['link']})")
     st.session_state["seo_extra_notes"] = st.text_area(
-        "검색 규칙 메모 (생성 시 자동 반영)",
-        value=st.session_state.get("seo_extra_notes", ""), height=100,
-        placeholder="예: 2026년부터 제목은 28자 이내 권장 등",
+        "검색 규칙 메모 (여기에 정리해서 적으면 생성 시 자동 반영)",
+        value=st.session_state.get("seo_extra_notes", ""),
+        height=100,
+        placeholder="예: 2026년부터 제목은 28자 이내 권장, 본문 도입부에 핵심 요약 3줄 필수 등",
     )
 
     st.divider()
     st.subheader("📦 공용 스킨 CSS (티스토리 전용)")
-    st.caption("티스토리 관리자 → 꾸미기 → 스킨 편집 → CSS 탭 맨 아래에 한 번만 붙여넣으세요.")
+    st.caption("지원금·축제·일반 블로그(HTML) 글에만 적용됩니다. 티스토리 관리자 → 꾸미기 → 스킨 편집 → CSS 탭 맨 아래에 한 번만 붙여넣으세요.")
     st.code(SKIN_CSS.strip(), language="css")
 
-col_nav, col_main = st.columns([0.85, 3], gap="large")
+col_input, col_output = st.columns([1, 1.6], gap="large")
 
-NAV_SECTIONS = ["🔥 키워드 추천", "📝 티스토리 글쓰기", "📄 네이버 글쓰기"]
-SECTION_PLATFORM = {"📝 티스토리 글쓰기": "티스토리 (HTML)", "📄 네이버 글쓰기": "네이버 (텍스트)"}
+with col_input:
+    mode = st.pills("카테고리", list(MODE_CONFIG.keys()), default=list(MODE_CONFIG.keys())[0])
+    if not mode:
+        mode = list(MODE_CONFIG.keys())[0]
+    cfg = MODE_CONFIG[mode]
 
-with col_nav:
-    st.markdown("**✏️ 메뉴**")
-    nav_section = st.radio("메뉴", NAV_SECTIONS, key="nav_section", label_visibility="collapsed")
-    content_key = None
-    if nav_section in SECTION_PLATFORM:
-        st.divider()
-        content_key = st.radio("유형", list(CONTENT_TYPES.keys()), key="nav_content")
+    topic = st.text_input(cfg["topic_label"], placeholder=cfg["topic_placeholder"])
 
-with col_main:
-    if nav_section == "🔥 키워드 추천":
-        st.markdown("### 🔥 요즘 인기 키워드 추천받기")
-        dl_ready = datalab_ready()
-        st.caption(
-            "플랫폼과 무관하게 먼저 여기서 주제를 골라두면, 아래 '티스토리 글쓰기' / '네이버 글쓰기' 메뉴로 "
-            "넘어갈 때 주제 칸에 그대로 채워져 있어요. 실시간 구글 검색 기반으로 후보를 뽑고" + (
-                ", 네이버 데이터랩으로 상대 검색량까지 검증해서 전체 순위를 매깁니다."
-                if dl_ready else
-                " 순서대로 보여드려요. (네이버 데이터랩을 연결하면 실제 검색량 기준 전체 순위를 매길 수 있어요 — 사이드바 참고)"
-            ) + " 계정 로그인이 필요한 크리에이터 어드바이저의 '내 통계'는 가져올 수 없지만, "
-            "그 화면을 캡처/복사해서 글쓰기 화면의 '추가 반영사항'에 붙여넣으면 그대로 반영됩니다."
-        )
-
-        trend_category = st.selectbox("카테고리", list(CONTENT_TYPES.keys()), key="trend_category")
-        all_categories = st.checkbox("전체 카테고리별로 나눠서 보기 (지원금·축제·건강정보·쿠팡파트너스·일반)", value=False)
-
-        def _render_ranked(kws, grounded, key_prefix):
-            if not grounded:
-                st.warning("⚠️ 실시간 검색 연동이 안 돼서 모델의 기존 지식으로 답했어요 — 오래된 정보일 수 있습니다.")
-            if not kws:
-                st.caption("추천 결과를 가져오지 못했습니다. 잠시 후 다시 시도해 주세요.")
-                return
-            if dl_ready:
-                with st.spinner("데이터랩으로 검색량 검증하는 중…"):
-                    scored, unscored = verify_with_datalab_all(kws)
-                for i, item in enumerate(scored, 1):
-                    if st.button(f"{i}위 · {item['keyword']} (지수 {item['score']})", key=f"{key_prefix}_s_{i}"):
-                        st.session_state["topic_input"] = item["keyword"]
-                        st.rerun()
-                if unscored:
-                    st.caption("검증 실패(데이터랩 응답 없음) — 그래도 추천 후보입니다")
-                    cols = st.columns(2)
-                    for i, kw in enumerate(unscored):
-                        if cols[i % 2].button(kw, key=f"{key_prefix}_u_{i}"):
-                            st.session_state["topic_input"] = kw
-                            st.rerun()
-            else:
-                cols = st.columns(2)
-                for i, kw in enumerate(kws):
-                    if cols[i % 2].button(kw, key=f"{key_prefix}_{i}"):
-                        st.session_state["topic_input"] = kw
-                        st.rerun()
-
-        if st.button("🔎 추천 + 검증", disabled=not search_ready, key="trend_btn"):
-            if all_categories:
-                grouped = {}
-                with st.spinner("전체 카테고리별로 인기 키워드를 검색하는 중… (시간이 좀 걸려요)"):
-                    for i, ck in enumerate(CONTENT_TYPES.keys()):
-                        if i > 0:
-                            time.sleep(2)
-                        kws, _, grounded = suggest_trending_topics(ck, count=5)
-                        grouped[ck] = (kws, grounded)
-                st.session_state["trend_grouped"] = grouped
-                st.session_state["trend_suggestions"] = None
-            else:
-                with st.spinner("인기 키워드를 검색하는 중…"):
-                    kws, _, grounded = suggest_trending_topics(trend_category, count=8)
-                st.session_state["trend_suggestions"] = (kws, grounded)
-                st.session_state["trend_grouped"] = None
-
-        if st.session_state.get("trend_grouped"):
-            for ck, (kws, grounded) in st.session_state["trend_grouped"].items():
-                st.markdown(f"**{ck}**")
-                _render_ranked(kws, grounded, key_prefix=f"grp_{ck}")
-        elif st.session_state.get("trend_suggestions"):
-            kws, grounded = st.session_state["trend_suggestions"]
-            _render_ranked(kws, grounded, key_prefix="single")
-
+    if cfg["link_mode"] == "dual":
+        link1_in = st.text_input(cfg["link1_label"], placeholder="https://... (비우면 자동 검색)")
+        link2_in = st.text_input(cfg["link2_label"], placeholder="https://... (비우면 자동 검색)")
     else:
-        platform_key = SECTION_PLATFORM[nav_section]
-        pcfg = PLATFORMS[platform_key]
-        ccfg = CONTENT_TYPES[content_key]
+        link1_in = st.text_input(cfg["link1_label"], placeholder="https://...")
+        link2_in = link1_in
+        if mode == "쿠팡파트너스":
+            st.caption("⚠️ 쿠팡 파트너스 이용약관상 링크는 실제 발급받은 파트너스 링크만 사용해야 합니다.")
 
-        st.markdown(f"### {platform_key} · {content_key}")
+    c1, c2 = st.columns(2)
+    with c1:
+        tone_key = st.selectbox("말투", list(TONE_OPTIONS.keys()))
+    with c2:
+        length_key = st.selectbox("분량", list(LENGTH_OPTIONS.keys()), index=1)
+    extra = st.text_area("추가 반영사항 (선택)", placeholder="예: 청주 지역 특화, 2026년 기준 등")
 
-        topic = st.text_input(ccfg["topic_label"], placeholder=ccfg["topic_placeholder"], key="topic_input")
+    use_research = st.checkbox(
+        "🔎 웹 리서치 사용 (출처 기반으로 작성)", value=client is not None,
+        help="Gemini의 자체 검색(Grounding)으로 주제를 실제 검색해서 그 결과를 근거로 글을 씁니다.",
+        disabled=client is None,
+    )
 
-        if ccfg["link_mode"] == "dual":
-            link1_in = st.text_input(ccfg["link1_label"], placeholder="https://... (비우면 자동 검색)")
-            link2_in = st.text_input(ccfg["link2_label"], placeholder="https://... (비우면 자동 검색)")
+    generate = st.button("✨ 블로그 글 생성하기", type="primary", use_container_width=True)
+
+with col_output:
+    if generate:
+        if not topic.strip():
+            st.error("주제를 입력해 주세요.")
+        elif client is None:
+            st.error("Google API 키가 필요합니다. 왼쪽 사이드바에서 입력하거나 Secrets에 등록하세요.")
         else:
-            link1_in = st.text_input(ccfg["link1_label"], placeholder="https://...")
-            link2_in = link1_in
-            if content_key == "쿠팡파트너스":
-                st.caption("⚠️ 쿠팡 파트너스 이용약관상 링크는 실제 발급받은 파트너스 링크만 사용해야 합니다.")
-
-        c1, c2 = st.columns(2)
-        with c1:
-            tone_key = st.selectbox("말투", list(TONE_OPTIONS.keys()))
-        with c2:
-            length_key = st.selectbox("분량", list(LENGTH_OPTIONS.keys()), index=1)
-        extra = st.text_area("추가 반영사항 (선택)", placeholder="예: 청주 지역 특화, 2026년 기준, 크리에이터 어드바이저 통계 붙여넣기 등")
-
-        use_research = st.checkbox(
-            "🔎 웹 리서치 사용 (실제 검색 결과 기반으로 작성)", value=search_ready,
-            help="Gemini의 구글 검색 연동으로 주제를 실제 검색해서 그 결과를 근거로 글을 씁니다.",
-            disabled=not search_ready,
-        )
-
-        generate = st.button("✨ 블로그 글 생성하기", type="primary", use_container_width=True)
-        st.divider()
-
-        if generate:
-            if not topic.strip():
-                st.error("주제를 입력해 주세요.")
-            elif client is None:
-                st.error("Google API 키가 필요합니다.")
-        else:
-            fmt = pcfg["format"]
             resolved_link1, resolved_link2 = link1_in.strip(), link2_in.strip()
             auto_used = []
-            if fmt == "html":
+            if cfg["format"] == "html":
                 if not resolved_link1:
-                    found, _ = search_official_link(topic.strip())
-                    resolved_link1 = found if found else "[링크 입력]"
+                    found, err = search_official_link(client, topic.strip())
                     if found:
+                        resolved_link1 = found
                         auto_used.append(("링크1", found))
-                if ccfg["link_mode"] == "dual" and not resolved_link2:
-                    found, _ = search_official_link(topic.strip())
-                    resolved_link2 = found if found else "[링크 입력]"
+                    else:
+                        resolved_link1 = "[링크 입력]"
+                if cfg["link_mode"] == "dual" and not resolved_link2:
+                    found, err = search_official_link(client, topic.strip())
                     if found:
+                        resolved_link2 = found
                         auto_used.append(("링크2", found))
+                    else:
+                        resolved_link2 = "[링크 입력]"
             resolved_link1 = resolved_link1 or "[링크 입력]"
             resolved_link2 = resolved_link2 or resolved_link1
 
-            research_block, research_sources, research_grounded = "", [], False
-            if use_research and search_ready:
+            research_block, research_sources = "", []
+            if use_research:
                 with st.spinner("주제를 웹에서 리서치하는 중…"):
-                    research_block, research_sources, research_grounded = research_topic(topic.strip())
-                    if not research_block:
-                        st.warning("리서치 검색에 실패해서 리서치 없이 진행합니다.")
-                    elif not research_grounded:
-                        st.warning("⚠️ 실시간 검색 연동이 안 돼서 모델의 기존 지식으로 리서치했어요 — 최신이 아닐 수 있습니다.")
+                    text, sources, err = research_topic(client, topic.strip())
+                    if text:
+                        research_block = format_research_block(text, sources)
+                        research_sources = sources
+                    else:
+                        st.warning(f"리서치 검색에 실패해서 리서치 없이 진행합니다: {err}")
 
             with st.spinner("SEO 구조에 맞춰 글을 작성하는 중…"):
                 try:
                     title, meta, tags, content, images, html_repaired = generate_post(
-                        content_key, platform_key, topic.strip(), resolved_link1, resolved_link2,
+                        client, mode, topic.strip(), resolved_link1, resolved_link2,
                         tone_key, length_key, extra.strip(), research_block,
                         st.session_state.get("seo_extra_notes", ""),
                     )
-                    checks = run_seo_check(content_key, fmt, topic.strip(), title, meta, tags, content, images)
+                    checks = run_seo_check(mode, cfg, topic.strip(), title, meta, tags, content, images)
                     st.session_state["result"] = {
                         "title": title, "meta": meta, "tags": tags,
-                        "content": content, "format": fmt, "mode": f"{platform_key} · {content_key}",
+                        "content": content, "format": cfg["format"], "mode": mode,
                         "checks": checks, "auto_used": auto_used, "images": images,
                         "html_repaired": html_repaired, "research_sources": research_sources,
-                        "research_grounded": research_grounded,
                     }
                 except Exception as e:
                     st.error(f"생성 중 오류가 발생했습니다: {e}")
 
-        result = st.session_state.get("result")
-        if result:
-            if result.get("auto_used"):
-                for label, url in result["auto_used"]:
-                    st.info(f"🔎 {label}를 자동 검색으로 채웠습니다: {url} (필요하면 직접 수정하세요)")
-            if result.get("html_repaired"):
-                st.warning("⚠️ 원본 HTML에서 태그가 안 닫힌 부분이 감지되어 자동으로 정리했습니다.")
-            if result.get("research_sources"):
-                label = "🔎 리서치 출처" if result.get("research_grounded") else "⚠️ 리서치 결과 (실시간 검색 미확인 — 참고만 하세요)"
-                with st.expander(f"{label} {len(result['research_sources'])}건"):
-                    for r in result["research_sources"]:
-                        st.markdown(f"- [{r['title']}]({r['link']})")
+    result = st.session_state.get("result")
+    if result:
+        if result.get("auto_used"):
+            for label, url in result["auto_used"]:
+                st.info(f"🔎 {label}를 자동 검색으로 채웠습니다: {url} (필요하면 직접 수정하세요)")
+        if result.get("html_repaired"):
+            st.warning("⚠️ 원본 HTML에서 태그가 안 닫힌 부분이 감지되어 자동으로 정리했습니다. "
+                       "이미지 자리나 구조가 이상해 보이면 다시 생성해보세요.")
+        if result.get("research_sources"):
+            with st.expander(f"🔎 리서치 출처 {len(result['research_sources'])}건 (이 자료를 근거로 작성됨)"):
+                for r in result["research_sources"]:
+                    st.markdown(f"- [{r['title']}]({r['link']})")
 
-            st.markdown(f"**[{result['mode']}] 제목** {result['title']}")
-            st.markdown(f"**메타설명** {result['meta']}")
+        st.markdown(f"**[{result['mode']}] 제목** {result['title']}")
+        st.markdown(f"**메타설명** {result['meta']}")
 
-            ICONS = {"ok": "✅", "warn": "⚠️", "bad": "❌"}
-            checks = result.get("checks", [])
-            bad_count = sum(1 for _, s, _ in checks if s == "bad")
-            warn_count = sum(1 for _, s, _ in checks if s == "warn")
-            summary = "모든 항목 통과" if not bad_count and not warn_count else f"주의 {warn_count}건 · 문제 {bad_count}건"
-            tag_chips = " ".join(f"`#{t.strip()}`" for t in result["tags"].split(",") if t.strip())
-            st.markdown(f"**태그** {tag_chips}")
-            with st.expander(f"🔍 SEO 체크리스트 — {summary}", expanded=bool(bad_count)):
-                for label, status, detail in checks:
-                    st.markdown(f"{ICONS.get(status, '•')} **{label}** — {detail}")
+        ICONS = {"ok": "✅", "warn": "⚠️", "bad": "❌"}
+        checks = result.get("checks", [])
+        bad_count = sum(1 for _, s, _ in checks if s == "bad")
+        warn_count = sum(1 for _, s, _ in checks if s == "warn")
+        summary = "모든 항목 통과" if not bad_count and not warn_count else f"주의 {warn_count}건 · 문제 {bad_count}건"
+        tag_chips = " ".join(f"`#{t.strip()}`" for t in result["tags"].split(",") if t.strip())
+        st.markdown(f"**태그** {tag_chips}")
+        with st.expander(f"🔍 SEO 체크리스트 — {summary}", expanded=bool(bad_count)):
+            st.caption("이 글이 프롬프트 규칙(키워드 배치·구조·문장 길이 등)을 실제로 지켰는지 기계적으로 확인한 결과입니다. "
+                       "백링크·블로그 지수·클릭률 같은 검색엔진의 실제 순위 요인은 발행 후에나 확인할 수 있어 여기 포함되지 않습니다.")
+            for label, status, detail in checks:
+                st.markdown(f"{ICONS.get(status, '•')} **{label}** — {detail}")
 
-            if result["format"] == "html":
-                tab_preview, tab_code = st.tabs(["미리보기", "HTML 코드"])
-                with tab_preview:
-                    components.html(f"<style>{SKIN_CSS}</style>{result['content']}", height=1000, scrolling=True)
-                with tab_code:
-                    st.code(result["content"], language="html")
-            else:
-                st.caption("네이버 스마트에디터에 그대로 붙여넣을 수 있는 순수 텍스트입니다.")
-                st.code(result["content"], language=None)
-
-            if result.get("images"):
-                st.subheader("🖼️ 이미지 생성 프롬프트")
-                st.caption("아래 프롬프트를 Google Flow 등에 붙여넣고, 마음에 드는 이미지를 골라 본문의 같은 번호 자리에 넣어주세요.")
-                for label, prompt in result["images"]:
-                    st.code(f"[{label}] {prompt}", language=None)
+        if result["format"] == "html":
+            tab_preview, tab_code = st.tabs(["미리보기", "HTML 코드"])
+            with tab_preview:
+                components.html(
+                    f"<style>{SKIN_CSS}</style>{result['content']}",
+                    height=1000, scrolling=True,
+                )
+            with tab_code:
+                st.code(result["content"], language="html")
         else:
-            st.info("왼쪽에서 플랫폼·유형·주제를 입력하고 생성 버튼을 누르면 결과가 여기에 표시됩니다.")
+            st.caption("네이버 블로그 에디터에 그대로 붙여넣을 수 있는 순수 텍스트입니다.")
+            st.code(result["content"], language=None)
+
+        if result.get("images"):
+            st.subheader("🖼️ 이미지 생성 프롬프트")
+            st.caption("아래 프롬프트를 복사해서 Google Flow(또는 다른 이미지 생성 도구)에 붙여넣고, "
+                       "마음에 드는 이미지를 골라 본문의 같은 번호 [이미지N] 자리에 넣어주세요.")
+            for label, prompt in result["images"]:
+                st.code(f"[{label}] {prompt}", language=None)
+    else:
+        st.info("왼쪽에서 카테고리와 주제를 입력하고 생성 버튼을 누르면 결과가 여기에 표시됩니다.")
 
 
-        # ────────────────────────────────────────────────────────────────
-        # 배치 생성
-        # ────────────────────────────────────────────────────────────────
-        st.divider()
-        with st.expander("📅 여러 주제 한 번에 생성 (배치)"):
-            st.caption("왼쪽에서 선택한 플랫폼·유형·말투·분량·리서치 설정을 그대로 사용해 순차 생성합니다.")
-            batch_topics_raw = st.text_area(
-                "주제 목록 (한 줄에 하나씩, 최대 30개)", height=180,
-                placeholder="예)\n혈압 낮추는 법\n겨울철 난방비 절약 방법\n무선 청소기 추천\n...",
-                key="batch_topics_raw",
-            )
-            run_batch = st.button("🚀 전체 순차 생성", key="run_batch_button")
+# ────────────────────────────────────────────────────────────────
+# 배치 생성 (주제 여러 개를 한 번에 큐로 넣어 순차 생성)
+# ────────────────────────────────────────────────────────────────
+st.divider()
+with st.expander("📅 여러 주제 한 번에 생성 (배치 — 30일치/1주일치 등)"):
+    st.caption(
+        "왼쪽에서 선택한 카테고리·말투·분량·리서치 설정을 그대로 사용해서, "
+        "아래 주제들을 한 줄에 하나씩 순서대로 생성합니다. "
+        "지원금/축제처럼 항목별 링크가 다른 카테고리는 링크를 자동 검색으로 채우거나 "
+        "생성 후 결과에서 직접 수정하는 걸 권장해요."
+    )
+    batch_topics_raw = st.text_area(
+        "주제 목록 (한 줄에 하나씩, 최대 30개)",
+        height=180,
+        placeholder="예)\n혈압 낮추는 법\n겨울철 난방비 절약 방법\n무선 청소기 추천\n...",
+        key="batch_topics_raw",
+    )
+    run_batch = st.button("🚀 전체 순차 생성", key="run_batch_button")
 
-            if run_batch:
-                topics = [t.strip() for t in batch_topics_raw.splitlines() if t.strip()][:30]
-                if not topics:
-                    st.error("주제를 한 줄에 하나씩 입력해 주세요.")
-                elif client is None:
-                    st.error("Google API 키가 필요합니다.")
+    if run_batch:
+        topics = [t.strip() for t in batch_topics_raw.splitlines() if t.strip()][:30]
+        if not topics:
+            st.error("주제를 한 줄에 하나씩 입력해 주세요.")
+        elif client is None:
+            st.error("Google API 키가 필요합니다.")
+        else:
+            batch_results = []
+            progress = st.progress(0.0, text="시작합니다…")
+            for i, t in enumerate(topics):
+                progress.progress((i) / len(topics), text=f"({i+1}/{len(topics)}) {t} 생성 중…")
+                try:
+                    b_link1 = link1_in.strip()
+                    b_link2 = link2_in.strip() if cfg["link_mode"] == "dual" else b_link1
+                    if cfg["format"] == "html":
+                        if not b_link1:
+                            found, _ = search_official_link(client, t)
+                            b_link1 = found or "[링크 입력]"
+                        if cfg["link_mode"] == "dual" and not b_link2:
+                            found, _ = search_official_link(client, t)
+                            b_link2 = found or "[링크 입력]"
+                    b_link1 = b_link1 or "[링크 입력]"
+                    b_link2 = b_link2 or b_link1
+
+                    b_research_block = ""
+                    b_sources = []
+                    if use_research:
+                        text, sources, _ = research_topic(client, t)
+                        if text:
+                            b_research_block = format_research_block(text, sources)
+                            b_sources = sources
+
+                    title, meta, tags, content, images, html_repaired = generate_post(
+                        client, mode, t, b_link1, b_link2, tone_key, length_key, extra.strip(),
+                        b_research_block, st.session_state.get("seo_extra_notes", ""),
+                    )
+                    batch_results.append({
+                        "topic": t, "title": title, "meta": meta, "tags": tags,
+                        "content": content, "format": cfg["format"], "mode": mode,
+                        "images": images, "sources": b_sources, "error": None,
+                    })
+                except Exception as e:
+                    batch_results.append({"topic": t, "error": str(e)})
+            progress.progress(1.0, text="완료!")
+            st.session_state["batch_results"] = batch_results
+
+    batch_results = st.session_state.get("batch_results")
+    if batch_results:
+        ok_count = sum(1 for r in batch_results if not r.get("error"))
+        st.success(f"{ok_count}/{len(batch_results)}건 생성 완료")
+
+        import io
+        import zipfile
+
+        zip_buf = io.BytesIO()
+        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for idx, r in enumerate(batch_results, 1):
+                if r.get("error"):
+                    continue
+                ext = "html" if r["format"] == "html" else "txt"
+                safe_name = re.sub(r"[\\/:*?\"<>|]", "_", r["title"] or r["topic"])[:60]
+                zf.writestr(f"{idx:02d}_{safe_name}.{ext}", r["content"])
+        st.download_button(
+            "⬇️ 전체 결과 ZIP으로 다운로드", data=zip_buf.getvalue(),
+            file_name="batch_posts.zip", mime="application/zip",
+        )
+
+        for idx, r in enumerate(batch_results, 1):
+            if r.get("error"):
+                st.error(f"{idx}. {r['topic']} — 생성 실패: {r['error']}")
+                continue
+            with st.expander(f"{idx}. [{r['mode']}] {r['title']}"):
+                st.markdown(f"**메타설명** {r['meta']}")
+                tag_chips = " ".join(f"`#{tg.strip()}`" for tg in r["tags"].split(",") if tg.strip())
+                st.markdown(f"**태그** {tag_chips}")
+                if r.get("sources"):
+                    st.caption(f"🔎 리서치 출처 {len(r['sources'])}건 반영됨")
+                if r["format"] == "html":
+                    st.code(r["content"], language="html")
                 else:
-                    fmt = pcfg["format"]
-                    batch_results = []
-                    progress = st.progress(0.0, text="시작합니다…")
-                    for i, t in enumerate(topics):
-                        progress.progress((i) / len(topics), text=f"({i+1}/{len(topics)}) {t} 생성 중…")
-                        if i > 0:
-                            time.sleep(4)  # 무료 티어 분당 요청 제한 방지용 대기
-                        try:
-                            b_link1 = link1_in.strip()
-                            b_link2 = link2_in.strip() if ccfg["link_mode"] == "dual" else b_link1
-                            if fmt == "html":
-                                if not b_link1:
-                                    found, _ = search_official_link(t)
-                                    b_link1 = found or "[링크 입력]"
-                                if ccfg["link_mode"] == "dual" and not b_link2:
-                                    found, _ = search_official_link(t)
-                                    b_link2 = found or "[링크 입력]"
-                            b_link1 = b_link1 or "[링크 입력]"
-                            b_link2 = b_link2 or b_link1
-
-                            b_research_block, b_sources = "", []
-                            if use_research and search_ready:
-                                b_research_block, b_sources, _ = research_topic(t)
-
-                            title, meta, tags, content, images, html_repaired = generate_post(
-                                content_key, platform_key, t, b_link1, b_link2, tone_key, length_key, extra.strip(),
-                                b_research_block, st.session_state.get("seo_extra_notes", ""),
-                            )
-                            batch_results.append({
-                                "topic": t, "title": title, "meta": meta, "tags": tags,
-                                "content": content, "format": fmt, "mode": f"{platform_key} · {content_key}",
-                                "images": images, "sources": b_sources, "error": None,
-                            })
-                        except Exception as e:
-                            batch_results.append({"topic": t, "error": str(e)})
-                    progress.progress(1.0, text="완료!")
-                    st.session_state["batch_results"] = batch_results
-
-            batch_results = st.session_state.get("batch_results")
-            if batch_results:
-                ok_count = sum(1 for r in batch_results if not r.get("error"))
-                st.success(f"{ok_count}/{len(batch_results)}건 생성 완료")
-
-                import io
-                import zipfile
-
-                zip_buf = io.BytesIO()
-                with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                    for idx, r in enumerate(batch_results, 1):
-                        if r.get("error"):
-                            continue
-                        ext = "html" if r["format"] == "html" else "txt"
-                        safe_name = re.sub(r"[\\/:*?\"<>|]", "_", r["title"] or r["topic"])[:60]
-                        zf.writestr(f"{idx:02d}_{safe_name}.{ext}", r["content"])
-                st.download_button("⬇️ 전체 결과 ZIP으로 다운로드", data=zip_buf.getvalue(),
-                                    file_name="batch_posts.zip", mime="application/zip")
-
-                for idx, r in enumerate(batch_results, 1):
-                    if r.get("error"):
-                        st.error(f"{idx}. {r['topic']} — 생성 실패: {r['error']}")
-                        continue
-                    with st.expander(f"{idx}. [{r['mode']}] {r['title']}"):
-                        st.markdown(f"**메타설명** {r['meta']}")
-                        tag_chips = " ".join(f"`#{tg.strip()}`" for tg in r["tags"].split(",") if tg.strip())
-                        st.markdown(f"**태그** {tag_chips}")
-                        if r.get("sources"):
-                            st.caption(f"🔎 리서치 출처 {len(r['sources'])}건 반영됨")
-                        st.code(r["content"], language="html" if r["format"] == "html" else None)
-                        ext = "html" if r["format"] == "html" else "txt"
-                        st.download_button("이 글만 다운로드", data=r["content"],
-                                            file_name=f"{r['title'] or r['topic']}.{ext}", key=f"dl_{idx}")
+                    st.code(r["content"], language=None)
+                ext = "html" if r["format"] == "html" else "txt"
+                st.download_button(
+                    "이 글만 다운로드", data=r["content"], file_name=f"{r['title'] or r['topic']}.{ext}",
+                    key=f"dl_{idx}",
+                )
