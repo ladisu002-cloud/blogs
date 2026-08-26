@@ -144,6 +144,13 @@ MODE_CONFIG = {
             "운동·식습관·수면 같은 일반적인 생활습관 정보만 다루고, '~에 도움이 된다고 알려져 있습니다', "
             "'전문가들은 ~을 권장합니다'처럼 출처를 특정하지 않는 일반론으로 서술하세요. "
             "실존 여부가 불확실한 특정 연구·논문·저널명을 지어내 인용하지 마세요. "
+            "만약 '추가 반영사항'에 특정 제품명이 포함돼 있다면, 그 제품을 반복적으로 홍보하듯 언급하지 말고 "
+            "성분/효과/원리 중심의 정보성 글로 풀어내세요. 제품명은 본문 전체에서 많아야 1~2회만 자연스럽게 "
+            "언급하고, 제목도 제품명이 아니라 사람들이 실제 검색할 성분명·증상·효과 키워드를 중심으로 지으세요. "
+            "가능하면 식약처 인증(건강기능식품) 여부, 일반적인 권장 섭취량, 주의해야 할 체질/복용 상황처럼 "
+            "확인 가능한 검증 정보를 포함해서 신뢰도를 높이되, 확인되지 않은 수치나 인증 내용을 지어내지 마세요. "
+            "글 후반부에 한 번만 '관련 제품 더 알아보기'처럼 자연스러운 CTA로 연결하고, 전체 톤은 광고보다 "
+            "정보 전달에 무게를 두세요. "
             "글 맨 끝에는 반드시 '이 글은 일반적인 건강 정보 제공을 목적으로 하며, 개인의 의학적 진단이나 "
             "치료를 대체하지 않습니다. 증상이 있다면 반드시 전문의와 상담하세요.'라는 문구를 그대로 포함하세요. "
             + QUALITY_RULES + " " + STYLE_GUIDE + " " + AD_SLOT_RULES + " " + IMAGE_PROMPT_RULES
@@ -152,24 +159,44 @@ MODE_CONFIG = {
 }
 
 SKIN_CLASSES_DOC = """
-사용 가능한 스킨 클래스 (이 클래스만 사용해서 HTML을 작성할 것. 새로운 class나 인라인 style은 만들지 말 것):
-- <div class="jb-post"> : 전체 글 감싸는 최외곽 wrapper (필수, 1개)
-- <div class="jb-hero">...</div> : 글 맨 위 히어로 배너 (필수, 1개)
-- <div class="jb-cta-wrap"><a class="jb-cta" href="LINK">버튼 텍스트👆</a></div> : CTA 버튼
-- <div class="jb-h2">섹션 제목</div> : 섹션 제목, 이모지 1개 포함. 분량 목표에 맞춰 4~6개 사용
-- <div class="jb-info">...</div> : 기본정보 요약 카드 (jb-info-row/label/val 조합, 선택)
-- <div class="jb-spot-list"><div class="jb-spot-item"><div class="jb-spot-icon">이모지</div><div class="jb-spot-body"><div class="jb-spot-name">이름</div><div class="jb-spot-desc">1~2문장 설명</div></div></div>...</div>
-  : 명소/프로그램/추천항목 등 나열형 정보를 카드 리스트로 보여줄 때 사용 (3~4개 항목)
-- <div class="jb-tip"><b>라벨</b> 설명글</div> : 꿀팁/주의사항 박스 (2~3개)
-- <div class="jb-table-wrap"><table class="jb-table">...</table></div> : 비교/조건표 (선택)
-- <div class="jb-qa"><div class="jb-qa-item"><div class="jb-qa-q">Q. 질문</div><div class="jb-qa-a">답변</div></div>...</div> : Q&A, 2~3문항
-- <div class="jb-divider">· · ·</div> : 섹션 구분선 (선택)
-- <div class="jb-img-slot">🖼️ [이미지N] 이 자리에 이미지를 삽입하세요</div>
-  : 이미지가 들어갈 자리 표시 (번호는 실제 이미지 순서와 일치시킬 것)
-- <span class="jb-highlight">강조 텍스트</span> : 본문 강조 inline span
-- 일반 문단은 <p>텍스트</p>
+아래 태그를 정확히 이 형식 그대로 사용해서 HTML을 작성하세요 (class와 style 속성을 모두 그대로 유지하고,
+직접 지어내거나 값을 바꾸지 마세요 — 내용물만 채우면 됩니다. 이 방식은 별도 CSS 등록 없이 그 자체로
+스타일이 적용됩니다):
+
+- 전체 wrapper(필수, 1개): <div class="jb-post" style="font-family:'Pretendard',-apple-system,sans-serif;color:#212832;font-size:16px;line-height:1.85;max-width:720px;margin:0 auto;padding:26px 22px 40px;">...</div>
+- 일반 문단: <p style="margin:0 0 14px;">텍스트</p>
+- 히어로 배너(필수, 1개, 글 맨 위):
+  <div class="jb-hero" style="position:relative;background:linear-gradient(135deg,#1B2A41 0%,#233A57 100%);border-radius:16px;padding:26px 26px 20px;margin-bottom:30px;color:#fff;">
+  <span class="jb-hero-tag" style="display:inline-block;font-size:12px;font-weight:700;letter-spacing:.03em;color:#1B2A41;background:#E3A03E;padding:4px 11px;border-radius:20px;margin-bottom:12px;">태그</span>
+  <div class="jb-hero-title" style="font-size:23px;font-weight:800;line-height:1.4;margin:0 0 14px;letter-spacing:-.01em;color:#fff;">제목</div>
+  <div class="jb-hero-meta" style="font-size:13px;color:#C9D3E0;padding-top:14px;border-top:1px dashed rgba(255,255,255,.28);">부제/설명</div>
+  </div>
+- CTA 버튼: <div class="jb-cta-wrap" style="text-align:center;margin:26px 0;"><a class="jb-cta" href="LINK" style="display:inline-block;background:#F0A202;color:#241802;font-weight:800;font-size:15px;padding:13px 30px;border-radius:30px;text-decoration:none;box-shadow:0 6px 16px rgba(240,162,2,.35);">버튼 텍스트👆</a></div>
+- 섹션 제목(이모지 1개 포함, 분량에 맞춰 4~6개): <div class="jb-h2" style="font-size:18.5px;font-weight:800;color:#1B2A41;margin:34px 0 14px;padding-bottom:9px;border-bottom:3px solid #1B2A41;display:inline-block;">섹션 제목</div>
+- 기본정보 요약 카드(선택):
+  <div class="jb-info" style="background:#FFFBF5;border:1px solid #F0E4D0;border-radius:12px;padding:6px 18px;margin:14px 0 20px;">
+  <div class="jb-info-row" style="display:flex;gap:14px;padding:11px 0;border-bottom:1px dashed #EADFC8;font-size:14.5px;"><div class="jb-info-label" style="flex:0 0 88px;font-weight:700;color:#B5762F;">라벨</div><div class="jb-info-val" style="color:#3A3A3A;">값</div></div>
+  (마지막 행은 border-bottom 없이) <div class="jb-info-row" style="display:flex;gap:14px;padding:11px 0;font-size:14.5px;">...</div>
+  </div>
+- 명소/프로그램/추천항목 카드 목록(나열형 정보, 3~4개):
+  <div class="jb-spot-list" style="margin:14px 0 22px;">
+  <div class="jb-spot-item" style="display:flex;gap:13px;padding:14px 0;border-bottom:1px dashed #EADFC8;"><div class="jb-spot-icon" style="font-size:23px;flex:0 0 30px;line-height:1.5;">이모지</div><div class="jb-spot-body"><div class="jb-spot-name" style="font-weight:800;color:#1B2A41;font-size:15px;margin-bottom:4px;">이름</div><div class="jb-spot-desc" style="font-size:14px;color:#454545;line-height:1.7;">1~2문장 설명</div></div></div>
+  (마지막 항목은 border-bottom 없이 동일하게 작성)
+  </div>
+- 꿀팁/주의사항 박스(2~3개): <div class="jb-tip" style="background:#EAF7F3;border-left:4px solid #1F6F63;border-radius:0 10px 10px 0;padding:13px 16px;margin:12px 0;font-size:14.5px;color:#184E46;line-height:1.7;"><b style="color:#0F3A33;">라벨</b> 설명글</div>
+- 비교/조건표(선택):
+  <div class="jb-table-wrap" style="overflow-x:auto;margin:16px 0 22px;border-radius:10px;border:1px solid #E7E1D6;"><table class="jb-table" style="width:100%;border-collapse:collapse;font-size:13.5px;min-width:420px;">
+  <tr><th style="background:#1B2A41;color:#fff;padding:10px 8px;font-size:13px;">헤더</th>...</tr>
+  <tr><td style="padding:10px 8px;text-align:center;border-top:1px solid #EFEAE0;color:#333;">값</td>...</tr>
+  (짝수 번째 데이터 행은 <tr style="background:#FBF8F2;">로 시작)
+  </table></div>
+- Q&A(2~3문항): <div class="jb-qa" style="margin:18px 0;"><div class="jb-qa-item" style="background:#F7F6F3;border-radius:10px;padding:14px 16px;margin-bottom:10px;"><div class="jb-qa-q" style="font-weight:800;color:#1B2A41;font-size:14.5px;margin-bottom:6px;">Q. 질문</div><div class="jb-qa-a" style="font-size:14px;color:#454545;line-height:1.75;">답변</div></div>...</div>
+- 섹션 구분선(선택): <div class="jb-divider" style="text-align:center;color:#C7BFAE;font-size:13px;margin:28px 0;letter-spacing:.4em;">· · ·</div>
+- 이미지 자리 표시(번호는 실제 이미지 순서와 일치): <div class="jb-img-slot" style="margin:18px 0;padding:40px 16px;text-align:center;background:#F4F1EA;border:2px dashed #D8D0BE;border-radius:12px;color:#8B8371;font-size:14px;">🖼️ [이미지N] 이 자리에 이미지를 삽입하세요</div>
+- 본문 강조(inline): <span class="jb-highlight" style="color:#E0507A;font-weight:700;">강조 텍스트</span>
 
 작성 규칙:
+- 위에 없는 새로운 class나 다른 style 값을 만들지 말고, 반드시 주어진 style 문자열을 그대로 복사해서 쓸 것
 - 본문 분량 목표에 맞춰 충분히 작성하고, 마지막에 반드시 ###END### 까지 도달할 것 (중간에 끊지 말 것)
 - 모든 태그를 빠짐없이 닫을 것
 - 코드펜스나 설명 문구 없이, 지정된 마커 형식으로만 응답할 것
@@ -192,13 +219,14 @@ SKIN_CSS = """
 .jb-post{font-family:'Pretendard',-apple-system,sans-serif;color:#212832;font-size:16px;line-height:1.85;max-width:720px;margin:0 auto;padding:26px 22px 40px;}
 .jb-post p{margin:0 0 14px;}
 .jb-highlight{color:#E0507A;font-weight:700;}
-.jb-hero{position:relative;background:linear-gradient(135deg,#1B2A41 0%,#233A57 100%);border-radius:16px;padding:26px 26px 20px;margin-bottom:30px;color:#fff;}
-.jb-hero-tag{display:inline-block;font-size:12px;font-weight:700;letter-spacing:.03em;color:#1B2A41;background:#E3A03E;padding:4px 11px;border-radius:20px;margin-bottom:12px;}
-.jb-hero-title{font-size:23px;font-weight:800;line-height:1.4;margin:0 0 14px;letter-spacing:-.01em;}
+.jb-hero{position:relative;background:linear-gradient(135deg,#1B2A41 0%,#233A57 100%);border-radius:16px;padding:26px 26px 20px;margin-bottom:30px;color:#fff !important;}
+.jb-hero,.jb-hero p,.jb-hero span,.jb-hero div,.jb-hero h1,.jb-hero h2,.jb-hero h3,.jb-hero li{color:#fff !important;}
+.jb-hero .jb-hero-tag{display:inline-block;font-size:12px;font-weight:700;letter-spacing:.03em;color:#1B2A41 !important;background:#E3A03E;padding:4px 11px;border-radius:20px;margin-bottom:12px;}
+.jb-hero .jb-hero-title{font-size:23px;font-weight:800;line-height:1.4;margin:0 0 14px;letter-spacing:-.01em;color:#fff !important;}
 .jb-hero-perf{border-top:2px dashed rgba(255,255,255,.28);position:relative;margin:0 -26px;}
 .jb-hero-perf::before,.jb-hero-perf::after{content:'';position:absolute;top:-9px;width:18px;height:18px;border-radius:50%;background:#ffffff;}
 .jb-hero-perf::before{left:-9px;} .jb-hero-perf::after{right:-9px;}
-.jb-hero-meta{font-size:13px;color:#C9D3E0;padding-top:14px;}
+.jb-hero .jb-hero-meta{font-size:13px;color:#C9D3E0 !important;padding-top:14px;}
 .jb-cta-wrap{text-align:center;margin:26px 0;}
 .jb-cta{display:inline-block;background:#F0A202;color:#241802;font-weight:800;font-size:15px;padding:13px 30px;border-radius:30px;text-decoration:none;box-shadow:0 6px 16px rgba(240,162,2,.35);}
 .jb-h2{font-size:18.5px;font-weight:800;color:#1B2A41;margin:34px 0 14px;padding-bottom:9px;border-bottom:3px solid #1B2A41;display:inline-block;}
@@ -306,6 +334,21 @@ def research_topic(client, topic, model_name=DEFAULT_RESEARCH_MODEL):
     return grounded_search(client, prompt, model_name)
 
 
+def plan_health_product_post(client, product_name):
+    """홈쇼핑/TV에 나온 건강기능식품 제품명을 받아서, 제품명이 아니라 시청자가 실제 검색할
+    성분/효과 키워드 중심의 SEO 제목과 핵심 기획 포인트를 웹 리서치 기반으로 제안한다.
+    반환: (raw 텍스트, 출처 리스트, 에러)"""
+    prompt = (
+        f"'{product_name}'이라는 건강기능식품(또는 관련 성분)이 최근 홈쇼핑/TV 방송에 나왔어. "
+        "이 제품을 직접 홍보하는 글이 아니라, 방송을 보고 시청자가 실제로 검색할 만한 "
+        "성분·효과·증상 키워드를 웹에서 조사해서 정리해줘. 다음 두 줄 형식으로만 답해줘 (다른 설명 금지):\n"
+        "제목: (32자 이내 SEO 블로그 제목 — 제품명/브랜드명 대신 성분명·효과·증상 키워드 중심)\n"
+        "포인트: (핵심 기획 포인트 2~3문장 — 다룰 원리/효과, 그리고 확인 가능하면 식약처 인증 여부, "
+        "일반적 권장 섭취량, 주의해야 할 체질/상황 등 신뢰도를 높일 검증 정보 포함)"
+    )
+    return grounded_search(client, prompt)
+
+
 def research_seo_rules(client, platform_hint):
     """네이버/티스토리 등 플랫폼의 최신 상위노출 규칙을 웹에서 검색해서 근거자료로 반환.
     검색 규칙은 계속 바뀌므로, 이 함수로 그때그때 다시 검색해 반영할 수 있다."""
@@ -328,6 +371,33 @@ def format_research_block(research_text, sources=None):
     if sources:
         lines.append("참고 출처: " + ", ".join(s["link"] for s in sources[:5]))
     return "\n".join(lines)
+
+
+JB_IMG_SLOT_STYLE = (
+    "margin:18px 0;padding:40px 16px;text-align:center;background:#F4F1EA;"
+    "border:2px dashed #D8D0BE;border-radius:12px;color:#8B8371;font-size:14px;"
+)
+
+
+def normalize_image_markers(content, images, fmt):
+    """모델이 이미지 자리 표시를 jb-img-slot 스타일 박스로 감싸지 않고
+    맨 텍스트 [이미지N]만 출력했을 때, 항상 일관된 스타일 박스로 보정한다."""
+    if fmt != "html":
+        return content
+    for label, _ in images:
+        marker = f"[{label}]"
+        already_ok = re.search(
+            rf'<div class="jb-img-slot"[^>]*>🖼️\s*{re.escape(marker)}\s*이 자리에 이미지를 삽입하세요\s*</div>',
+            content,
+        )
+        if already_ok:
+            continue
+        proper = f'<div class="jb-img-slot" style="{JB_IMG_SLOT_STYLE}">🖼️ {marker} 이 자리에 이미지를 삽입하세요</div>'
+        content, n1 = re.subn(rf'<p[^>]*>\s*{re.escape(marker)}(\s*이 자리에 이미지를 삽입하세요)?\s*</p>', proper, content)
+        if n1:
+            continue
+        content, n2 = re.subn(rf'{re.escape(marker)}(\s*이 자리에 이미지를 삽입하세요)?', proper, content, count=1)
+    return content
 
 
 def extract_between(text, start_marker, end_marker):
@@ -431,20 +501,29 @@ CTA 안내: {cta_note}
     images_end = "###THUMBNAIL###" if "###THUMBNAIL###" in raw else "###END###"
     images_raw = extract_between(raw, "###IMAGES###", images_end) if "###IMAGES###" in raw else ""
     images = re.findall(r"\[(이미지\d+)\]\s*(.+)", images_raw)
+    content = normalize_image_markers(content, images, cfg["format"])
 
     thumbnail_prompt = extract_between(raw, "###THUMBNAIL###", "###END###") if "###THUMBNAIL###" in raw else ""
     thumbnail_prompt = thumbnail_prompt.strip()
 
     if mode == "쿠팡파트너스" and DISCLOSURE_TEXT not in content:
         content = DISCLOSURE_TEXT + "\n\n" + content
+    if mode == "건강정보" and has_real_link and DISCLOSURE_TEXT not in content:
+        content = f'<p style="font-size:13px;color:#8B8371;">{DISCLOSURE_TEXT}</p>' + content
     if mode == "건강정보" and HEALTH_DISCLAIMER not in content:
-        content += f'<div class="jb-tip"><b>안내</b> {HEALTH_DISCLAIMER}</div>'
+        content += (
+            '<div class="jb-tip" style="background:#EAF7F3;border-left:4px solid #1F6F63;'
+            'border-radius:0 10px 10px 0;padding:13px 16px;margin:12px 0;font-size:14.5px;'
+            f'color:#184E46;line-height:1.7;"><b style="color:#0F3A33;">안내</b> {HEALTH_DISCLAIMER}</div>'
+        )
 
     # 애드센스 광고 자동 삽입 (html 카테고리만 해당)
     html_repaired = False
     if cfg["format"] == "html":
         ad_code = st.session_state.get("adsense_code", "").strip()
-        replacement = f'<div class="jb-ad-slot">{ad_code}</div>' if ad_code else ""
+        replacement = (
+            f'<div class="jb-ad-slot" style="margin:26px 0;text-align:center;">{ad_code}</div>' if ad_code else ""
+        )
         content = content.replace("<!--AD_SLOT-->", replacement)
 
         # 태그 균형 자동 보정: 모델이 가끔 div를 안 닫아서, Tistory가 이걸 다시 파싱할 때
@@ -498,6 +577,12 @@ def run_seo_check(mode, cfg, topic, title, meta, tags, content, images):
         if mode == "축제/행사":
             spot_count = content.count("jb-spot-item")
             checks.append(("명소/프로그램 카드", "ok" if spot_count >= 3 else "warn", f"jb-spot-item {spot_count}개"))
+        if mode == "건강정보":
+            checks.append(("건강정보 고지 문구", "ok" if HEALTH_DISCLAIMER in content else "bad",
+                            "포함" if HEALTH_DISCLAIMER in content else "누락 — 자동 보정됨"))
+            if cta_count > 0:
+                checks.append(("쿠팡 파트너스 고지 문구", "ok" if DISCLOSURE_TEXT in content else "bad",
+                                "포함" if DISCLOSURE_TEXT in content else "누락 — 자동 보정됨"))
         ad_code = st.session_state.get("adsense_code", "").strip()
         if ad_code:
             ad_count = content.count("jb-ad-slot")
@@ -509,9 +594,6 @@ def run_seo_check(mode, cfg, topic, title, meta, tags, content, images):
         if mode == "쿠팡파트너스":
             checks.append(("파트너스 고지 문구", "ok" if DISCLOSURE_TEXT in content else "bad",
                             "포함" if DISCLOSURE_TEXT in content else "누락 — 자동 보정됨"))
-        if mode == "건강정보":
-            checks.append(("건강정보 고지 문구", "ok" if HEALTH_DISCLAIMER in content else "bad",
-                            "포함" if HEALTH_DISCLAIMER in content else "누락 — 자동 보정됨"))
 
     slot_count = len(re.findall(r"\[이미지\d+\]", content))
     checks.append((
@@ -591,8 +673,10 @@ with st.sidebar:
     )
 
     st.divider()
-    st.subheader("📦 공용 스킨 CSS (티스토리 전용)")
-    st.caption("지원금·축제·일반 블로그(HTML) 글에만 적용됩니다. 티스토리 관리자 → 꾸미기 → 스킨 편집 → CSS 탭 맨 아래에 한 번만 붙여넣으세요.")
+    st.subheader("📦 스킨 CSS (선택 사항)")
+    st.caption("이제 모든 스타일이 각 태그의 style 속성에 직접 포함돼 있어서, 티스토리 스킨에 CSS를 "
+               "등록하지 않아도 붙여넣는 즉시 그대로 보여요. 아래 CSS는 등록하지 않아도 되지만, "
+               "혹시 다른 곳에서도 통일된 스타일을 쓰고 싶으실 때를 위한 참고용으로만 남겨뒀어요.")
     st.code(SKIN_CSS.strip(), language="css")
 
 col_input, col_output = st.columns([1, 1.6], gap="large")
@@ -604,6 +688,33 @@ with col_input:
     cfg = MODE_CONFIG[mode]
 
     topic = st.text_input(cfg["topic_label"], placeholder=cfg["topic_placeholder"])
+
+    if mode == "건강정보":
+        with st.expander("📺 홈쇼핑 제품에서 기획안 뽑기 (선택)"):
+            st.caption("방송에 나온 제품명을 넣으면, 제품명이 아니라 시청자가 실제 검색할 성분/효과 키워드로 "
+                       "SEO 제목과 핵심 기획 포인트를 리서치해서 제안해드려요. 마음에 들면 위 주제칸에 복사해서 넣으세요.")
+            plan_products_raw = st.text_area(
+                "제품명 (한 줄에 하나씩)", height=80,
+                placeholder="예)\n캡슐레이션 효소\n마그네슘\n콘드로이친",
+                key="plan_products_raw",
+            )
+            if st.button("🔎 기획안 생성", disabled=client is None, key="plan_button"):
+                names = [n.strip() for n in plan_products_raw.splitlines() if n.strip()][:10]
+                plans = []
+                with st.spinner("제품별로 리서치하는 중…"):
+                    for name in names:
+                        text, sources, err = plan_health_product_post(client, name)
+                        plans.append({"name": name, "text": text, "sources": sources, "error": err})
+                st.session_state["health_plans"] = plans
+            for p in st.session_state.get("health_plans", []):
+                st.markdown(f"**{p['name']}**")
+                if p.get("error") and not p.get("text"):
+                    st.warning(f"실패: {p['error']}")
+                else:
+                    st.markdown(p["text"])
+                    for s in p.get("sources", [])[:3]:
+                        st.caption(f"출처: [{s['title']}]({s['link']})")
+                st.divider()
 
     if cfg["link_mode"] == "dual":
         link1_in = st.text_input(cfg["link1_label"], placeholder="https://... (비우면 자동 검색)")
