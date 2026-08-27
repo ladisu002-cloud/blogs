@@ -517,14 +517,35 @@ CTA 안내: {cta_note}
             f'color:#184E46;line-height:1.7;"><b style="color:#0F3A33;">안내</b> {HEALTH_DISCLAIMER}</div>'
         )
 
+    def split_adsense_code(raw_code):
+        """전체 애드센스 코드에서 라이브러리 로더(<script ...adsbygoogle.js...>)와
+        광고 유닛 코드(<ins>+활성화 script)를 분리한다.
+        반환: (loader_script_or_empty, unit_code)
+        페이지당 로더 스크립트는 한 번만 있으면 되므로, 첫 광고 자리에만 붙이고
+        나머지 자리에는 유닛 코드만 반복 삽입하기 위함."""
+        if not raw_code:
+            return "", ""
+        loader_match = re.search(r'<script[^>]*adsbygoogle\.js[^<]*</script>', raw_code, re.IGNORECASE)
+        loader = loader_match.group(0) if loader_match else ""
+        unit_code = raw_code.replace(loader, "", 1).strip() if loader else raw_code.strip()
+        return loader, unit_code
+
     # 애드센스 광고 자동 삽입 (html 카테고리만 해당)
     html_repaired = False
     if cfg["format"] == "html":
         ad_code = st.session_state.get("adsense_code", "").strip()
-        replacement = (
-            f'<div class="jb-ad-slot" style="margin:26px 0;text-align:center;">{ad_code}</div>' if ad_code else ""
-        )
-        content = content.replace("<!--AD_SLOT-->", replacement)
+        loader, unit_code = split_adsense_code(ad_code)
+        slot_index = 0
+
+        def _ad_replace(_match):
+            nonlocal slot_index
+            slot_index += 1
+            if not ad_code:
+                return ""
+            inner = (loader + unit_code) if slot_index == 1 else unit_code
+            return f'<div class="jb-ad-slot" style="margin:26px 0;text-align:center;">{inner}</div>'
+
+        content = re.sub(r"<!--AD_SLOT-->", _ad_replace, content)
 
         # 태그 균형 자동 보정: 모델이 가끔 div를 안 닫아서, Tistory가 이걸 다시 파싱할 때
         # 이후 내용(이미지 자리 포함)이 엉뚱한 위치로 밀려나는 문제를 방지한다.
@@ -953,6 +974,10 @@ with st.expander("📅 여러 주제 한 번에 생성 (배치 — 30일치/1주
                 if r.get("thumbnail_prompt"):
                     st.caption("🖼️ 썸네일 프롬프트")
                     st.code(r["thumbnail_prompt"], language=None)
+                if r.get("images"):
+                    st.caption("🖼️ 본문 이미지 생성 프롬프트")
+                    for label, prompt in r["images"]:
+                        st.code(f"[{label}] {prompt}", language=None)
                 if r["format"] == "html":
                     st.code(r["content"], language="html")
                 else:
