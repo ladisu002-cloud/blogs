@@ -280,32 +280,41 @@ def get_client():
     return genai.Client(api_key=api_key)
 
 
-DEFAULT_RESEARCH_MODEL = "gemini-flash-latest"
+RESEARCH_MODEL_FALLBACKS = ("gemini-flash-latest", "gemini-flash-lite-latest")
 
 
-def grounded_search(client, query, model_name=DEFAULT_RESEARCH_MODEL):
+def grounded_search(client, query, model_name=None):
     """Gemini의 Google Search Grounding으로 실제 웹검색 결과를 근거로 답변과 출처 링크를 받아온다.
     별도의 Custom Search 설정 없이, 이미 쓰고 있는 GOOGLE_API_KEY 하나로 동작한다.
+    model_name을 지정하지 않으면 gemini-flash-latest → gemini-flash-lite-latest 순으로
+    할당량(429) 초과 시 자동으로 다음 모델로 재시도한다 (generate_post의 재시도 로직과 동일).
     반환: (응답 텍스트, 출처 리스트[{title, link}], 에러메시지 or None)"""
-    try:
-        config = types.GenerateContentConfig(
-            tools=[types.Tool(google_search=types.GoogleSearch())],
-            temperature=0.3,
-        )
-        resp = client.models.generate_content(model=model_name, contents=query, config=config)
-        text = resp.text or ""
-        sources = []
+    models_to_try = (model_name,) if model_name else RESEARCH_MODEL_FALLBACKS
+    last_err = None
+    for m in models_to_try:
         try:
-            gm = resp.candidates[0].grounding_metadata
-            for c in (gm.grounding_chunks or []):
-                web = getattr(c, "web", None)
-                if web and getattr(web, "uri", None):
-                    sources.append({"title": getattr(web, "title", "") or web.uri, "link": web.uri})
-        except Exception:
-            pass
-        return text, sources, None
-    except Exception as e:
-        return "", [], str(e)
+            config = types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                temperature=0.3,
+            )
+            resp = client.models.generate_content(model=m, contents=query, config=config)
+            text = resp.text or ""
+            sources = []
+            try:
+                gm = resp.candidates[0].grounding_metadata
+                for c in (gm.grounding_chunks or []):
+                    web = getattr(c, "web", None)
+                    if web and getattr(web, "uri", None):
+                        sources.append({"title": getattr(web, "title", "") or web.uri, "link": web.uri})
+            except Exception:
+                pass
+            return text, sources, None
+        except Exception as e:
+            last_err = str(e)
+            if "429" in last_err or "RESOURCE_EXHAUSTED" in last_err:
+                continue  # 다음 모델로 재시도
+            break  # 할당량 문제가 아니면 즉시 중단
+    return "", [], last_err
 
 
 def search_official_link(client, query):
@@ -323,7 +332,7 @@ def search_official_link(client, query):
     return None, "검색 결과 없음"
 
 
-def research_topic(client, topic, model_name=DEFAULT_RESEARCH_MODEL):
+def research_topic(client, topic):
     """주제를 웹에서 리서치해서 (연구 요약 텍스트, 출처 리스트, 에러) 반환.
     이 결과가 writer 단계의 리서치 자료가 되어, 확인 안 된 내용을 지어내지 않도록 근거를 제공한다."""
     prompt = (
@@ -331,7 +340,7 @@ def research_topic(client, topic, model_name=DEFAULT_RESEARCH_MODEL):
         "핵심 사실을 4~6가지 항목으로 간단히 정리해줘. 각 항목은 한두 문장으로, "
         "수치나 날짜, 조건처럼 정확해야 하는 정보는 검색 결과에 있는 것만 사용하고 지어내지 마."
     )
-    return grounded_search(client, prompt, model_name)
+    return grounded_search(client, prompt)
 
 
 def plan_health_product_post(client, product_name):
