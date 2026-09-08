@@ -338,49 +338,9 @@ def _generate_with_retry(client, **gen_kwargs):
     raise last_err
 
 
-def grounded_search(client, query, model_name=None):
-    """Gemini의 Google Search Grounding으로 실제 웹검색 결과를 근거로 답변과 출처 링크를 받아온다.
-    별도의 Custom Search 설정 없이, 이미 쓰고 있는 GOOGLE_API_KEY 하나로 동작한다.
-    model_name을 지정하지 않으면 gemini-flash-latest → gemini-flash-lite-latest 순으로 시도하며,
-    429(할당량 초과)나 503(서버 과부하) 같은 일시적 에러는 잠깐 대기 후 재시도하다가
-    다음 모델로 넘어간다. 그 외 에러는 바로 중단한다.
-    반환: (응답 텍스트, 출처 리스트[{title, link}], 에러메시지 or None)"""
-    models_to_try = (model_name,) if model_name else RESEARCH_MODEL_FALLBACKS
-    last_err = None
-    attempt = 0
-    for m in models_to_try:
-        retries_left = 2  # 같은 모델로도 일시적 에러면 두 번 더 시도
-        while True:
-            try:
-                config = types.GenerateContentConfig(
-                    tools=[types.Tool(google_search=types.GoogleSearch())],
-                    temperature=0.3,
-                )
-                resp = client.models.generate_content(model=m, contents=query, config=config)
-                text = resp.text or ""
-                sources = []
-                try:
-                    gm = resp.candidates[0].grounding_metadata
-                    for c in (gm.grounding_chunks or []):
-                        web = getattr(c, "web", None)
-                        if web and getattr(web, "uri", None):
-                            sources.append({"title": getattr(web, "title", "") or web.uri, "link": web.uri})
-                except Exception:
-                    pass
-                return text, sources, None
-            except Exception as e:
-                last_err = str(e)
-                if _is_transient_error(last_err) and retries_left > 0:
-                    retries_left -= 1
-                    _backoff_sleep(attempt)
-                    attempt += 1
-                    continue  # 같은 모델로 재시도
-                break  # 이 모델은 포기하고 다음 모델로 (또는 할당량 문제가 아니면 완전 중단)
-        if not _is_transient_error(last_err or ""):
-            break  # 일시적 에러가 아니면 다음 모델도 시도할 이유가 없음
-    return "", [], last_err
-
-
+# 구글 검색 그라운딩(Gemini google_search 도구)을 쓰던 grounded_search()는 더 이상 어디서도
+# 호출하지 않는다 — 아래 무료 검색 경로로 전부 대체했다 (결제수단 등록 여부와 무관하게 항상 동작).
+#
 # ─────────────────────────────────────────────────────────────────
 # 무료 검색(네이버 오픈API + 위키백과) — 결제수단 등록 없이 쓸 수 있는 리서치 경로.
 # 구글 검색 그라운딩(Grounding)은 매달 5,000건까지 무료이긴 하지만, 그 "무료"를 쓰려면
@@ -481,15 +441,12 @@ def search_official_link(query, naver_id, naver_secret):
     return None, err or "검색 결과 없음"
 
 
-def research_topic(client, topic):
+def research_topic(topic, naver_id, naver_secret):
     """주제를 웹에서 리서치해서 (연구 요약 텍스트, 출처 리스트, 에러) 반환.
-    이 결과가 writer 단계의 리서치 자료가 되어, 확인 안 된 내용을 지어내지 않도록 근거를 제공한다."""
-    prompt = (
-        f"'{topic}'에 대해 블로그 글을 쓰려고 해. 최신 웹 정보를 검색해서 "
-        "핵심 사실을 4~6가지 항목으로 간단히 정리해줘. 각 항목은 한두 문장으로, "
-        "수치나 날짜, 조건처럼 정확해야 하는 정보는 검색 결과에 있는 것만 사용하고 지어내지 마."
-    )
-    return grounded_search(client, prompt)
+    이 결과가 writer 단계의 리서치 자료가 되어, 확인 안 된 내용을 지어내지 않도록 근거를 제공한다.
+    예전엔 구글 검색 그라운딩(결제수단 등록 필수)을 썼지만, 결제 여부와 무관하게 항상 되는
+    무료 검색(네이버 오픈API + 위키백과)으로 통일했다."""
+    return free_research(topic, naver_id, naver_secret)
 
 
 def plan_health_product_post(client, product_name, naver_id, naver_secret):
@@ -1004,8 +961,9 @@ with col_input:
     extra = st.text_area("추가 반영사항 (선택)", placeholder="예: 청주 지역 특화, 2026년 기준 등")
 
     use_research = st.checkbox(
-        "🔎 웹 리서치 사용 (출처 기반으로 작성)", value=client is not None,
-        help="Gemini의 자체 검색(Grounding)으로 주제를 실제 검색해서 그 결과를 근거로 글을 씁니다.",
+        "🔎 웹 리서치 사용 (자료 기반으로 작성)", value=client is not None,
+        help="네이버 검색 오픈API(있으면)와 위키백과로 주제를 실제 검색해서 그 결과를 사실관계 "
+             "확인용 배경자료로 삼아 글을 씁니다 (출처는 본문에 노출하지 않음). 결제수단 등록과 무관하게 항상 동작해요.",
         disabled=client is None,
     )
 
@@ -1041,7 +999,7 @@ with col_output:
             research_block, research_sources = "", []
             if use_research:
                 with st.spinner("주제를 웹에서 리서치하는 중…"):
-                    text, sources, err = research_topic(client, topic.strip())
+                    text, sources, err = research_topic(topic.strip(), naver_id, naver_secret)
                     if text:
                         research_block = format_research_block(text, sources)
                         research_sources = sources
@@ -1174,7 +1132,7 @@ with st.expander("📅 여러 주제 한 번에 생성 (배치 — 30일치/1주
                     b_research_block = ""
                     b_sources = []
                     if use_research:
-                        text, sources, _ = research_topic(client, t)
+                        text, sources, _ = research_topic(t, naver_id, naver_secret)
                         if text:
                             b_research_block = format_research_block(text, sources)
                             b_sources = sources
