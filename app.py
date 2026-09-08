@@ -1,5 +1,7 @@
 import os
 import re
+import time
+import random
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
@@ -288,38 +290,62 @@ def get_client():
 
 RESEARCH_MODEL_FALLBACKS = ("gemini-flash-latest", "gemini-flash-lite-latest")
 
+# 429(RESOURCE_EXHAUSTED, 할당량 초과)와 503(UNAVAILABLE, 구글 서버 일시 과부하)은 둘 다
+# "지금 이 순간만" 문제인 경우가 많아서, 무료 티어에서 짧은 시간에 요청이 몰릴 때 특히 잘 납니다.
+# 모델을 즉시 바꾸는 것만으로는 안 되는 경우(양쪽 모델이 동시에 과부하)가 있어서,
+# 잠깐 대기했다가 재시도하는 로직을 별도로 둡니다.
+_TRANSIENT_MARKERS = ("429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE")
+
+
+def _is_transient_error(err_str: str) -> bool:
+    return any(marker in err_str for marker in _TRANSIENT_MARKERS)
+
+
+def _backoff_sleep(attempt: int):
+    """attempt(0부터 시작)가 커질수록 더 오래 대기 (지수 백오프 + 약간의 무작위성)."""
+    time.sleep(min(2 ** attempt, 20) + random.uniform(0, 1.5))
+
 
 def grounded_search(client, query, model_name=None):
     """Gemini의 Google Search Grounding으로 실제 웹검색 결과를 근거로 답변과 출처 링크를 받아온다.
     별도의 Custom Search 설정 없이, 이미 쓰고 있는 GOOGLE_API_KEY 하나로 동작한다.
-    model_name을 지정하지 않으면 gemini-flash-latest → gemini-flash-lite-latest 순으로
-    할당량(429) 초과 시 자동으로 다음 모델로 재시도한다 (generate_post의 재시도 로직과 동일).
+    model_name을 지정하지 않으면 gemini-flash-latest → gemini-flash-lite-latest 순으로 시도하며,
+    429(할당량 초과)나 503(서버 과부하) 같은 일시적 에러는 잠깐 대기 후 재시도하다가
+    다음 모델로 넘어간다. 그 외 에러는 바로 중단한다.
     반환: (응답 텍스트, 출처 리스트[{title, link}], 에러메시지 or None)"""
     models_to_try = (model_name,) if model_name else RESEARCH_MODEL_FALLBACKS
     last_err = None
+    attempt = 0
     for m in models_to_try:
-        try:
-            config = types.GenerateContentConfig(
-                tools=[types.Tool(google_search=types.GoogleSearch())],
-                temperature=0.3,
-            )
-            resp = client.models.generate_content(model=m, contents=query, config=config)
-            text = resp.text or ""
-            sources = []
+        retries_left = 2  # 같은 모델로도 일시적 에러면 두 번 더 시도
+        while True:
             try:
-                gm = resp.candidates[0].grounding_metadata
-                for c in (gm.grounding_chunks or []):
-                    web = getattr(c, "web", None)
-                    if web and getattr(web, "uri", None):
-                        sources.append({"title": getattr(web, "title", "") or web.uri, "link": web.uri})
-            except Exception:
-                pass
-            return text, sources, None
-        except Exception as e:
-            last_err = str(e)
-            if "429" in last_err or "RESOURCE_EXHAUSTED" in last_err:
-                continue  # 다음 모델로 재시도
-            break  # 할당량 문제가 아니면 즉시 중단
+                config = types.GenerateContentConfig(
+                    tools=[types.Tool(google_search=types.GoogleSearch())],
+                    temperature=0.3,
+                )
+                resp = client.models.generate_content(model=m, contents=query, config=config)
+                text = resp.text or ""
+                sources = []
+                try:
+                    gm = resp.candidates[0].grounding_metadata
+                    for c in (gm.grounding_chunks or []):
+                        web = getattr(c, "web", None)
+                        if web and getattr(web, "uri", None):
+                            sources.append({"title": getattr(web, "title", "") or web.uri, "link": web.uri})
+                except Exception:
+                    pass
+                return text, sources, None
+            except Exception as e:
+                last_err = str(e)
+                if _is_transient_error(last_err) and retries_left > 0:
+                    retries_left -= 1
+                    _backoff_sleep(attempt)
+                    attempt += 1
+                    continue  # 같은 모델로 재시도
+                break  # 이 모델은 포기하고 다음 모델로 (또는 할당량 문제가 아니면 완전 중단)
+        if not _is_transient_error(last_err or ""):
+            break  # 일시적 에러가 아니면 다음 모델도 시도할 이유가 없음
     return "", [], last_err
 
 
@@ -484,11 +510,17 @@ CTA 안내: {cta_note}
         return resp.text
 
     raw, best = None, None
+    transient_attempt = 0
     for model_name in ("gemini-flash-latest", "gemini-flash-lite-latest"):
         for thinking_budget in (1024, 0, None):
             try:
                 candidate = call_model(model_name, thinking_budget)
-            except Exception:
+            except Exception as e:
+                # 429(할당량 초과)/503(서버 과부하)처럼 지금 이 순간만 문제인 에러는
+                # 바로 다음 조합으로 넘어가기 전에 잠깐 대기해서 성공 확률을 높인다.
+                if _is_transient_error(str(e)):
+                    _backoff_sleep(transient_attempt)
+                    transient_attempt += 1
                 continue
             if not candidate or not candidate.strip():
                 continue
@@ -738,7 +770,9 @@ with col_input:
                 names = [n.strip() for n in plan_products_raw.splitlines() if n.strip()][:10]
                 plans = []
                 with st.spinner("제품별로 리서치하는 중…"):
-                    for name in names:
+                    for i, name in enumerate(names):
+                        if i > 0:
+                            time.sleep(1.5)  # 연속 호출이 몰려서 429/503 나는 걸 줄이기 위한 간격
                         text, sources, err = plan_health_product_post(client, name)
                         plans.append({"name": name, "text": text, "sources": sources, "error": err})
                 st.session_state["health_plans"] = plans
@@ -919,6 +953,8 @@ with st.expander("📅 여러 주제 한 번에 생성 (배치 — 30일치/1주
             progress = st.progress(0.0, text="시작합니다…")
             for i, t in enumerate(topics):
                 progress.progress((i) / len(topics), text=f"({i+1}/{len(topics)}) {t} 생성 중…")
+                if i > 0:
+                    time.sleep(2)  # 주제 사이에 간격을 둬서 무료 티어 분당 요청 한도(429/503)를 덜 건드림
                 try:
                     b_link1 = link1_in.strip()
                     b_link2 = link2_in.strip() if cfg["link_mode"] == "dual" else b_link1
