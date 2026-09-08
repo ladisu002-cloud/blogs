@@ -306,6 +306,30 @@ def _backoff_sleep(attempt: int):
     time.sleep(min(2 ** attempt, 20) + random.uniform(0, 1.5))
 
 
+def _generate_with_retry(client, **gen_kwargs):
+    """client.models.generate_content(**gen_kwargs)를 모델 별칭 순서대로 시도하되,
+    429/503처럼 일시적인 에러면 잠깐 대기 후 같은 모델로 재시도하다가 다음 모델로 넘어간다.
+    그라운딩 없는 일반 텍스트 생성(예: plan_health_product_post)에 사용 — 결제수단 없이도 동작한다."""
+    last_err = None
+    attempt = 0
+    for m in RESEARCH_MODEL_FALLBACKS:
+        retries_left = 2
+        while True:
+            try:
+                return client.models.generate_content(model=m, **gen_kwargs)
+            except Exception as e:
+                last_err = e
+                if _is_transient_error(str(e)) and retries_left > 0:
+                    retries_left -= 1
+                    _backoff_sleep(attempt)
+                    attempt += 1
+                    continue
+                break
+        if not _is_transient_error(str(last_err)):
+            break
+    raise last_err
+
+
 def grounded_search(client, query, model_name=None):
     """Gemini의 Google Search Grounding으로 실제 웹검색 결과를 근거로 답변과 출처 링크를 받아온다.
     별도의 Custom Search 설정 없이, 이미 쓰고 있는 GOOGLE_API_KEY 하나로 동작한다.
@@ -349,19 +373,93 @@ def grounded_search(client, query, model_name=None):
     return "", [], last_err
 
 
-def search_official_link(client, query):
-    """Grounding으로 공식 홈페이지 링크 하나를 찾는다. (link, error) 반환."""
-    text, sources, err = grounded_search(
-        client, f"{query} 공식 홈페이지 URL을 검색해서 정확한 링크 하나만 알려줘. 다른 설명 없이 URL만 출력해."
+# ─────────────────────────────────────────────────────────────────
+# 무료 검색(네이버 오픈API + 위키백과) — 결제수단 등록 없이 쓸 수 있는 리서치 경로.
+# 구글 검색 그라운딩(Grounding)은 매달 5,000건까지 무료이긴 하지만, 그 "무료"를 쓰려면
+# 애초에 프로젝트에 결제수단(카드)이 등록되어 있어야 해서, 카드 등록 전에는 첫 요청부터
+# 429(RESOURCE_EXHAUSTED)가 납니다. 아래 경로는 카드 등록 자체가 필요 없습니다.
+# ─────────────────────────────────────────────────────────────────
+def naver_search(query, client_id, client_secret, api="webkr", display=5):
+    """네이버 검색 오픈API (NAVER API HUB, 무료 — 결제수단 등록 불필요).
+    api: webkr(웹문서) 또는 encyc(백과사전). 2026년부터 옛 openapi.naver.com 방식은
+    naverapihub.apigw.ntruss.com + X-NCP-APIGW-API-KEY-ID 방식으로 이관됐습니다."""
+    url = f"https://naverapihub.apigw.ntruss.com/search/v1/{api}"
+    headers = {"X-NCP-APIGW-API-KEY-ID": client_id, "X-NCP-APIGW-API-KEY": client_secret}
+    resp = requests.get(url, headers=headers, params={"query": query, "display": display}, timeout=10)
+    resp.raise_for_status()
+    items = resp.json().get("items", [])
+    return [
+        {
+            "title": re.sub(r"<[^>]+>", "", i.get("title", "")),
+            "description": re.sub(r"<[^>]+>", "", i.get("description", "")),
+            "link": i.get("link", ""),
+        }
+        for i in items
+    ]
+
+
+def wikipedia_search(topic, limit=3):
+    """한국어 위키백과 검색 (완전 무료, 키/카드조차 필요 없음)."""
+    search_url = "https://ko.wikipedia.org/w/api.php"
+    resp = requests.get(
+        search_url,
+        params={"action": "query", "list": "search", "srsearch": topic, "format": "json", "srlimit": limit},
+        timeout=10,
     )
-    if err:
-        return None, err
+    resp.raise_for_status()
+    titles = [item["title"] for item in resp.json().get("query", {}).get("search", [])]
+    results = []
+    for title in titles:
+        try:
+            summary_url = f"https://ko.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(title)}"
+            s = requests.get(summary_url, timeout=10)
+            if s.status_code == 200:
+                data = s.json()
+                extract = data.get("extract", "")
+                page_url = data.get("content_urls", {}).get("desktop", {}).get("page", "")
+                if extract:
+                    results.append({"title": title, "description": extract, "link": page_url})
+        except requests.RequestException:
+            continue
+    return results
+
+
+def free_research(topic, naver_id, naver_secret):
+    """비용 없는 검색(네이버 오픈API 우선, 자격증명 없거나 결과 없으면 위키백과)으로 자료를 모은다.
+    반환: (합쳐진 텍스트, 출처 리스트[{title, link}], 에러메시지 or None) — grounded_search()와
+    같은 모양으로 반환해서 호출부(UI) 코드를 최소한만 바꿔도 되게 한다."""
+    results, err = [], None
+    if naver_id.strip() and naver_secret.strip():
+        try:
+            results += naver_search(topic, naver_id, naver_secret, api="encyc", display=2)
+        except Exception as e:
+            err = str(e)
+        try:
+            results += naver_search(topic, naver_id, naver_secret, api="webkr", display=5)
+        except Exception as e:
+            if not results:
+                err = str(e)
+    if not results:
+        try:
+            results = wikipedia_search(topic)
+        except Exception as e:
+            if not err:
+                err = str(e)
+    if not results:
+        return "", [], (err or "검색 결과를 찾지 못했어요 (네이버 검색 키 등록 여부를 확인해보세요).")
+    text = "\n".join(f"- {r['title']}: {r['description']}" for r in results if r.get("description"))
+    sources = [{"title": r["title"], "link": r["link"]} for r in results if r.get("link")]
+    return text, sources, None
+
+
+def search_official_link(query, naver_id, naver_secret):
+    """무료 검색(네이버 웹문서)으로 공식 홈페이지로 추정되는 링크 하나를 찾는다. (link, error) 반환.
+    그라운딩처럼 '이게 진짜 공식 사이트다'를 판별해주는 게 아니라 검색 상위 결과를 그대로 쓰는 것이라,
+    가끔 공식 사이트가 아닌 블로그·뉴스 링크가 나올 수 있다 — 생성 후 꼭 직접 확인을 권장한다."""
+    text, sources, err = free_research(f"{query} 공식 홈페이지", naver_id, naver_secret)
     if sources:
         return sources[0]["link"], None
-    m = re.search(r"https?://\S+", text)
-    if m:
-        return m.group(0).rstrip(".,)"), None
-    return None, "검색 결과 없음"
+    return None, err or "검색 결과 없음"
 
 
 def research_topic(client, topic):
@@ -375,29 +473,44 @@ def research_topic(client, topic):
     return grounded_search(client, prompt)
 
 
-def plan_health_product_post(client, product_name):
+def plan_health_product_post(client, product_name, naver_id, naver_secret):
     """홈쇼핑/TV에 나온 건강기능식품 제품명을 받아서, 제품명이 아니라 시청자가 실제 검색할
-    성분/효과 키워드 중심의 SEO 제목과 핵심 기획 포인트를 웹 리서치 기반으로 제안한다.
+    성분/효과 키워드 중심의 SEO 제목과 핵심 기획 포인트를 제안한다.
+    무료 검색(네이버/위키백과)으로 자료를 먼저 모은 뒤, 그 내용을 근거로 Gemini가 (그라운딩 없이,
+    순수 텍스트 생성 — 결제수단 없이도 완전 무료) 정리해서 답한다.
     반환: (raw 텍스트, 출처 리스트, 에러)"""
+    research_text, sources, research_err = free_research(product_name, naver_id, naver_secret)
+    if not research_text:
+        return "", [], research_err or "관련 자료를 찾지 못했어요."
+
     prompt = (
         f"'{product_name}'이라는 건강기능식품(또는 관련 성분)이 최근 홈쇼핑/TV 방송에 나왔어. "
-        "이 제품을 직접 홍보하는 글이 아니라, 방송을 보고 시청자가 실제로 검색할 만한 "
-        "성분·효과·증상 키워드를 웹에서 조사해서 정리해줘. 다음 두 줄 형식으로만 답해줘 (다른 설명 금지):\n"
+        "아래는 이 제품/성분에 대해 무료 검색으로 확인한 자료야. 이 내용에 근거해서, "
+        "이 제품을 직접 홍보하는 글이 아니라 방송을 보고 시청자가 실제로 검색할 만한 "
+        "성분·효과·증상 키워드를 중심으로 정리해줘. 자료에 없는 내용은 지어내지 말고, "
+        "다음 두 줄 형식으로만 답해줘 (다른 설명 금지):\n"
         "제목: (32자 이내 SEO 블로그 제목 — 제품명/브랜드명 대신 성분명·효과·증상 키워드 중심)\n"
         "포인트: (핵심 기획 포인트 2~3문장 — 다룰 원리/효과, 그리고 확인 가능하면 식약처 인증 여부, "
-        "일반적 권장 섭취량, 주의해야 할 체질/상황 등 신뢰도를 높일 검증 정보 포함)"
+        "일반적 권장 섭취량, 주의해야 할 체질/상황 등 신뢰도를 높일 검증 정보 포함)\n\n"
+        f"[검색된 자료]\n{research_text}"
     )
-    return grounded_search(client, prompt)
+    try:
+        resp = _generate_with_retry(client, contents=prompt, config=types.GenerateContentConfig(
+            max_output_tokens=500, temperature=0.3,
+        ))
+        return (resp.text or "").strip(), sources, None
+    except Exception as e:
+        return "", sources, str(e)
 
 
-def research_seo_rules(client, platform_hint):
-    """네이버/티스토리 등 플랫폼의 최신 상위노출 규칙을 웹에서 검색해서 근거자료로 반환.
+def research_seo_rules(platform_hint, naver_id, naver_secret):
+    """네이버/티스토리 등 플랫폼의 최신 상위노출 규칙을 무료 검색(네이버 웹문서)으로 확인해서 근거자료로 반환.
     검색 규칙은 계속 바뀌므로, 이 함수로 그때그때 다시 검색해 반영할 수 있다."""
     query = (
-        f"{platform_hint} 블로그 상위노출 SEO 규칙 최신 기준을 검색해서 알려줘. "
-        "제목 글자수, 본문 분량, 키워드 배치, 이미지 개수, 태그, 저품질/금지 패턴 등 핵심만 정리해줘."
+        f"{platform_hint} 블로그 상위노출 SEO 규칙 최신 기준. "
+        "제목 글자수, 본문 분량, 키워드 배치, 이미지 개수, 태그, 저품질/금지 패턴"
     )
-    return grounded_search(client, query)
+    return free_research(query, naver_id, naver_secret)
 
 
 def format_research_block(research_text, sources=None):
@@ -712,23 +825,40 @@ with st.sidebar:
                "실제 티스토리에 붙여넣으면 정상 노출됩니다.")
 
     st.divider()
+    st.subheader("🔎 무료 검색 키 (네이버, 선택)")
+    st.caption(
+        "'공식 링크 자동검색'·'기획안 생성'·'SEO 규칙 새로고침'은 이제 구글 검색 그라운딩 대신 "
+        "네이버 오픈API(무료, 결제수단 등록 불필요)로 동작합니다. 안 넣으면 위키백과로만 검색돼서 "
+        "결과가 더 적을 수 있어요. (developers.naver.com이 아니라 NCP 콘솔의 'NAVER API HUB'에서 "
+        "발급받은 Client ID/Secret — blog-writer-app에서 쓰던 것과 같은 키를 그대로 넣으면 됩니다.)"
+    )
+    naver_id = st.text_input(
+        "네이버 오픈API Client ID",
+        value=st.secrets.get("NAVER_CLIENT_ID", "") if hasattr(st, "secrets") else "",
+    )
+    naver_secret = st.text_input(
+        "네이버 오픈API Client Secret",
+        value=st.secrets.get("NAVER_CLIENT_SECRET", "") if hasattr(st, "secrets") else "",
+        type="password",
+    )
+
+    st.divider()
     st.subheader("🔎 공식 링크 자동 검색 (선택)")
-    st.success("Gemini 자체 검색(Grounding)으로 동작합니다 — 별도 설정 없이 링크를 비워두면 자동으로 채워집니다.")
+    st.caption("네이버 웹문서 검색 상위 결과를 그대로 씁니다 — 그라운딩처럼 '진짜 공식 사이트'인지 "
+               "판별해주진 않으니, 자동으로 채워진 링크는 발행 전에 한 번 확인해주세요.")
 
     st.divider()
     st.subheader("📈 검색 규칙(SEO) 새로고침 (선택)")
     st.caption("네이버·티스토리 상위노출 규칙은 계속 바뀌므로, 필요할 때 웹에서 다시 검색해 아래 노트에 반영하세요. "
                "저장한 노트는 앞으로 생성되는 모든 글의 시스템 규칙에 자동으로 추가됩니다.")
     platform_hint = st.selectbox("검색 대상 플랫폼", ["네이버", "티스토리"], key="seo_refresh_platform")
-    if st.button("🔎 최신 SEO 규칙 검색", disabled=client is None):
+    if st.button("🔎 최신 SEO 규칙 검색"):
         with st.spinner("검색 중…"):
-            text, sources, err = research_seo_rules(client, platform_hint)
+            text, sources, err = research_seo_rules(platform_hint, naver_id, naver_secret)
         st.session_state["seo_refresh_text"] = text
         st.session_state["seo_refresh_sources"] = sources
         if err and not text:
             st.warning(f"검색 실패: {err}")
-    if client is None:
-        st.caption("⚠️ 이 기능도 위의 Google API 키 등록이 필요합니다.")
     if st.session_state.get("seo_refresh_text"):
         st.markdown(st.session_state["seo_refresh_text"])
         for s in st.session_state.get("seo_refresh_sources", []):
@@ -773,7 +903,7 @@ with col_input:
                     for i, name in enumerate(names):
                         if i > 0:
                             time.sleep(1.5)  # 연속 호출이 몰려서 429/503 나는 걸 줄이기 위한 간격
-                        text, sources, err = plan_health_product_post(client, name)
+                        text, sources, err = plan_health_product_post(client, name, naver_id, naver_secret)
                         plans.append({"name": name, "text": text, "sources": sources, "error": err})
                 st.session_state["health_plans"] = plans
             for p in st.session_state.get("health_plans", []):
@@ -821,14 +951,14 @@ with col_output:
             auto_used = []
             if cfg["format"] == "html":
                 if not resolved_link1:
-                    found, err = search_official_link(client, topic.strip())
+                    found, err = search_official_link(topic.strip(), naver_id, naver_secret)
                     if found:
                         resolved_link1 = found
                         auto_used.append(("링크1", found))
                     else:
                         resolved_link1 = "[링크 입력]"
                 if cfg["link_mode"] == "dual" and not resolved_link2:
-                    found, err = search_official_link(client, topic.strip())
+                    found, err = search_official_link(topic.strip(), naver_id, naver_secret)
                     if found:
                         resolved_link2 = found
                         auto_used.append(("링크2", found))
@@ -960,10 +1090,10 @@ with st.expander("📅 여러 주제 한 번에 생성 (배치 — 30일치/1주
                     b_link2 = link2_in.strip() if cfg["link_mode"] == "dual" else b_link1
                     if cfg["format"] == "html":
                         if not b_link1:
-                            found, _ = search_official_link(client, t)
+                            found, _ = search_official_link(t, naver_id, naver_secret)
                             b_link1 = found or "[링크 입력]"
                         if cfg["link_mode"] == "dual" and not b_link2:
-                            found, _ = search_official_link(client, t)
+                            found, _ = search_official_link(t, naver_id, naver_secret)
                             b_link2 = found or "[링크 입력]"
                     b_link1 = b_link1 or "[링크 입력]"
                     b_link2 = b_link2 or b_link1
