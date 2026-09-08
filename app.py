@@ -21,7 +21,10 @@ QUALITY_RULES = (
     "친근하고 신뢰감 있는 어조로, 독자가 흔히 궁금해하거나 헷갈리는 지점을 콕 짚어 먼저 풀어주세요. "
     "\"이것은 중요한 요소입니다\", \"다음과 같은 방법이 있습니다\" 같은 딱딱하고 상투적인 AI 문체는 피하세요. "
     "단, 실제로 확인되지 않은 1인칭 경험(예: 특정 제품을 직접 써봤다는 구체적 후기)을 사실처럼 지어내지는 마세요 — "
-    "독자를 오도할 수 있으므로, 대신 흔히 겪는 상황에 공감하는 화법으로 신뢰를 쌓으세요."
+    "독자를 오도할 수 있으므로, 대신 흔히 겪는 상황에 공감하는 화법으로 신뢰를 쌓으세요. "
+    "참고자료로 리서치 요약이 주어지더라도, 본문에는 출처 URL이나 사이트명, '출처:', '참고:' 같은 "
+    "출처 표기를 절대 나열하거나 언급하지 마세요 — 리서치는 사실관계를 틀리지 않기 위한 배경자료일 뿐이니, "
+    "인용 표시 없이 자연스러운 정보성 문장으로만 녹여서 쓰세요."
 )
 
 # 필자 고유 말투 가이드 (조회수 높았던 글 5편 분석 결과 — 모든 카테고리 공통 적용)
@@ -491,32 +494,51 @@ def research_topic(client, topic):
 
 def plan_health_product_post(client, product_name, naver_id, naver_secret):
     """홈쇼핑/TV에 나온 건강기능식품 제품명을 받아서, 제품명이 아니라 시청자가 실제 검색할
-    성분/효과 키워드 중심의 SEO 제목과 핵심 기획 포인트를 제안한다.
+    성분/효과 키워드 중심의 SEO 제목 후보 2~3개와 핵심 기획 포인트를 제안한다.
     무료 검색(네이버/위키백과)으로 자료를 먼저 모은 뒤, 그 내용을 근거로 Gemini가 (그라운딩 없이,
     순수 텍스트 생성 — 결제수단 없이도 완전 무료) 정리해서 답한다.
-    반환: (raw 텍스트, 출처 리스트, 에러)"""
+    반환: (제목 후보 리스트, 포인트 텍스트, 출처 리스트, 에러)"""
     research_text, sources, research_err = free_research(product_name, naver_id, naver_secret)
     if not research_text:
-        return "", [], research_err or "관련 자료를 찾지 못했어요."
+        return [], "", [], research_err or "관련 자료를 찾지 못했어요."
 
     prompt = (
         f"'{product_name}'이라는 건강기능식품(또는 관련 성분)이 최근 홈쇼핑/TV 방송에 나왔어. "
         "아래는 이 제품/성분에 대해 무료 검색으로 확인한 자료야. 이 내용에 근거해서, "
         "이 제품을 직접 홍보하는 글이 아니라 방송을 보고 시청자가 실제로 검색할 만한 "
         "성분·효과·증상 키워드를 중심으로 정리해줘. 자료에 없는 내용은 지어내지 말고, "
-        "다음 두 줄 형식으로만 답해줘 (다른 설명 금지):\n"
-        "제목: (32자 이내 SEO 블로그 제목 — 제품명/브랜드명 대신 성분명·효과·증상 키워드 중심)\n"
+        "다음 형식으로만 답해줘 (다른 설명 금지, 각 줄은 절대 중간에 끊기지 않게 끝까지 완성할 것):\n"
+        "제목1: (32자 이내 SEO 블로그 제목 — 제품명/브랜드명 대신 성분명·효과·증상 키워드 중심)\n"
+        "제목2: (제목1과는 다른 각도/키워드의 32자 이내 SEO 제목)\n"
+        "제목3: (제목1,2와도 다른 각도의 32자 이내 SEO 제목)\n"
         "포인트: (핵심 기획 포인트 2~3문장 — 다룰 원리/효과, 그리고 확인 가능하면 식약처 인증 여부, "
         "일반적 권장 섭취량, 주의해야 할 체질/상황 등 신뢰도를 높일 검증 정보 포함)\n\n"
         f"[검색된 자료]\n{research_text}"
     )
     try:
         resp = _generate_with_retry(client, contents=prompt, config=types.GenerateContentConfig(
-            max_output_tokens=500, temperature=0.3,
+            max_output_tokens=1536, temperature=0.3,
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
         ))
-        return (resp.text or "").strip(), sources, None
+        raw = (resp.text or "").strip()
     except Exception as e:
-        return "", sources, str(e)
+        return [], "", sources, str(e)
+
+    titles = []
+    for i in (1, 2, 3):
+        m = re.search(rf"제목\s*{i}\s*[:：]\s*(.+)", raw)
+        if m:
+            t = m.group(1).strip().strip("*").strip()
+            if t:
+                titles.append(t)
+    if not titles:
+        # 혹시 모델이 "제목:" 한 줄 형식으로만 답했을 때를 위한 하위 호환
+        m = re.search(r"제목\s*[:：]\s*(.+)", raw)
+        if m:
+            titles = [m.group(1).strip().strip("*").strip()]
+    point_m = re.search(r"포인트\s*[:：]\s*(.+)", raw, flags=re.DOTALL)
+    point_text = point_m.group(1).strip() if point_m else (raw if not titles else "")
+    return titles, point_text, sources, None
 
 
 def research_seo_rules(platform_hint, naver_id, naver_secret):
@@ -530,16 +552,18 @@ def research_seo_rules(platform_hint, naver_id, naver_secret):
 
 
 def format_research_block(research_text, sources=None):
-    """research_topic() 결과를 writer 프롬프트에 그대로 넣을 수 있는 텍스트 블록으로 변환."""
+    """research_topic() 결과를 writer 프롬프트에 그대로 넣을 수 있는 텍스트 블록으로 변환.
+    출처 URL은 일부러 프롬프트에 넣지 않는다 — 모델이 본문에 그대로 베껴 쓰는 걸 막기 위해서다.
+    (출처는 sources 값 자체로 화면 표시용으로만 별도 사용한다.)"""
     if not research_text:
         return ""
     lines = [
         "다음은 이 주제에 대해 웹 검색으로 실제 확인한 리서치 요약입니다. "
-        "이 내용을 우선순위로 삼아 작성하고, 여기 없는 내용을 사실처럼 지어내지 마세요:",
+        "이 내용을 우선순위로 삼아 작성하고, 여기 없는 내용을 사실처럼 지어내지 마세요. "
+        "단, 이건 사실관계 확인용 배경자료일 뿐이니 아래 요약 속 표현을 그대로 베끼거나 "
+        "출처/링크를 본문에 언급하지 말고, 자연스러운 문장으로 재구성해서 쓰세요:",
         research_text,
     ]
-    if sources:
-        lines.append("참고 출처: " + ", ".join(s["link"] for s in sources[:5]))
     return "\n".join(lines)
 
 
@@ -579,7 +603,7 @@ def extract_between(text, start_marker, end_marker):
     return (text[frm:] if e == -1 else text[frm:e]).strip()
 
 
-def generate_post(client, mode, topic, link1, link2, tone_key, length_key, extra, research_block="", seo_notes=""):
+def generate_post(client, mode, topic, link1, link2, tone_key, length_key, extra, research_block="", seo_notes="", fixed_title=""):
     cfg = MODE_CONFIG[mode]
     tone = TONE_OPTIONS[tone_key]
     length = LENGTH_OPTIONS[length_key]
@@ -591,6 +615,11 @@ def generate_post(client, mode, topic, link1, link2, tone_key, length_key, extra
         "링크가 준비되어 있으니 시스템 지침대로 CTA 버튼을 사용하세요."
         if has_real_link else
         "이번 글에는 실제 링크가 없으므로 jb-cta-wrap/jb-cta 버튼을 아예 넣지 마세요."
+    )
+    title_instruction = (
+        f"(SEO 제목, 32자 이내, 핵심 키워드를 앞쪽에 배치)"
+        if not fixed_title.strip() else
+        f"이미 확정된 제목입니다. 아래 제목을 한 글자도 바꾸지 말고 그대로 쓰세요: {fixed_title.strip()}"
     )
 
     user_prompt = f"""
@@ -608,7 +637,7 @@ CTA 안내: {cta_note}
 
 응답은 아래 마커 형식을 정확히 지켜 작성하세요 (마커 앞뒤 다른 텍스트 금지):
 ###TITLE###
-(SEO 제목, 32자 이내, 핵심 키워드를 앞쪽에 배치)
+{title_instruction}
 ###META###
 (메타 설명, 80자 이내)
 ###TAGS###
@@ -899,17 +928,29 @@ with st.sidebar:
 col_input, col_output = st.columns([1, 1.6], gap="large")
 
 with col_input:
+    # "이 제목으로 글쓰기" 버튼(아래 기획안 뽑기 expander 안)을 누르면 여기서 topic_input 위젯이
+    # 만들어지기 전에 값을 채워넣는다 — 위젯이 이미 만들어진 뒤에는 그 key를 다시 못 바꾸기 때문에,
+    # 버튼 클릭 시점엔 _pending_topic에만 담아두고 rerun해서 다음 실행에서 여기로 반영한다.
+    if st.session_state.get("_pending_topic") is not None:
+        st.session_state["topic_input"] = st.session_state.pop("_pending_topic")
+
     mode = st.pills("카테고리", list(MODE_CONFIG.keys()), default=list(MODE_CONFIG.keys())[0])
     if not mode:
         mode = list(MODE_CONFIG.keys())[0]
     cfg = MODE_CONFIG[mode]
 
-    topic = st.text_input(cfg["topic_label"], placeholder=cfg["topic_placeholder"])
+    topic = st.text_input(cfg["topic_label"], placeholder=cfg["topic_placeholder"], key="topic_input")
+    if st.session_state.get("fixed_title") and topic.strip() != st.session_state["fixed_title"].strip():
+        # 자동으로 채워진 제목을 사용자가 직접 고쳤으면 고정을 풀고 평소처럼 새 제목을 생성하게 한다.
+        st.session_state["fixed_title"] = ""
+    if st.session_state.get("fixed_title"):
+        st.caption(f"✅ 이 제목 그대로 고정해서 생성합니다: **{st.session_state['fixed_title']}** (직접 수정하면 고정이 풀려요)")
 
     if mode == "건강정보":
         with st.expander("📺 홈쇼핑 제품에서 기획안 뽑기 (선택)"):
             st.caption("방송에 나온 제품명을 넣으면, 제품명이 아니라 시청자가 실제 검색할 성분/효과 키워드로 "
-                       "SEO 제목과 핵심 기획 포인트를 리서치해서 제안해드려요. 마음에 들면 위 주제칸에 복사해서 넣으세요.")
+                       "SEO 제목 후보 2~3개와 핵심 기획 포인트를 리서치해서 제안해드려요. "
+                       "마음에 드는 제목 옆 버튼을 누르면 그 제목 그대로 아래에서 바로 글이 생성돼요.")
             plan_products_raw = st.text_area(
                 "제품명 (한 줄에 하나씩)", height=80,
                 placeholder="예)\n캡슐레이션 효소\n마그네슘\n콘드로이친",
@@ -922,17 +963,28 @@ with col_input:
                     for i, name in enumerate(names):
                         if i > 0:
                             time.sleep(1.5)  # 연속 호출이 몰려서 429/503 나는 걸 줄이기 위한 간격
-                        text, sources, err = plan_health_product_post(client, name, naver_id, naver_secret)
-                        plans.append({"name": name, "text": text, "sources": sources, "error": err})
+                        titles, point_text, _sources, err = plan_health_product_post(client, name, naver_id, naver_secret)
+                        plans.append({"name": name, "titles": titles, "point": point_text, "error": err})
                 st.session_state["health_plans"] = plans
-            for p in st.session_state.get("health_plans", []):
+            for pi, p in enumerate(st.session_state.get("health_plans", [])):
                 st.markdown(f"**{p['name']}**")
-                if p.get("error") and not p.get("text"):
+                if p.get("error") and not p.get("titles"):
                     st.warning(f"실패: {p['error']}")
+                    if p.get("point"):
+                        st.caption(p["point"])
                 else:
-                    st.markdown(p["text"])
-                    for s in p.get("sources", [])[:3]:
-                        st.caption(f"출처: [{s['title']}]({s['link']})")
+                    if p.get("point"):
+                        st.caption(p["point"])
+                    for ti, t in enumerate(p.get("titles", [])):
+                        bc1, bc2 = st.columns([5, 1.6])
+                        with bc1:
+                            st.markdown(f"· {t}")
+                        with bc2:
+                            if st.button("이 제목으로 글쓰기", key=f"use_title_{pi}_{ti}", use_container_width=True):
+                                st.session_state["_pending_topic"] = t
+                                st.session_state["fixed_title"] = t
+                                st.session_state["auto_generate_from_title"] = True
+                                st.rerun()
                 st.divider()
 
     if cfg["link_mode"] == "dual":
@@ -960,7 +1012,7 @@ with col_input:
     generate = st.button("✨ 블로그 글 생성하기", type="primary", use_container_width=True)
 
 with col_output:
-    if generate:
+    if generate or st.session_state.pop("auto_generate_from_title", False):
         if not topic.strip():
             st.error("주제를 입력해 주세요.")
         elif client is None:
@@ -1002,6 +1054,7 @@ with col_output:
                         client, mode, topic.strip(), resolved_link1, resolved_link2,
                         tone_key, length_key, extra.strip(), research_block,
                         st.session_state.get("seo_extra_notes", ""),
+                        st.session_state.get("fixed_title", ""),
                     )
                     checks = run_seo_check(mode, cfg, topic.strip(), title, meta, tags, content, images)
 
@@ -1012,6 +1065,7 @@ with col_output:
                         "thumbnail_prompt": thumbnail_prompt,
                         "html_repaired": html_repaired, "research_sources": research_sources,
                     }
+                    st.session_state["fixed_title"] = ""  # 한 번 쓰고 나면 고정 해제 — 다음 글은 다시 자유롭게 제목 생성
                 except Exception as e:
                     st.error(f"생성 중 오류가 발생했습니다: {e}")
 
