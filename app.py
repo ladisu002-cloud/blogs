@@ -55,8 +55,13 @@ AD_SLOT_RULES = (
 IMAGE_PROMPT_RULES = (
     "소제목(섹션) 하나당 이미지 1개씩, 보통 4~6개 정도가 적당합니다. 이미지가 들어가면 좋을 자리마다 "
     "본문에 [이미지1], [이미지2]처럼 번호가 매겨진 자리 표시를 넣으세요. "
-    "그리고 그 자리 표시를 쓴 바로 다음에, 그 번호와 일치하는 영어 이미지 생성 프롬프트를 "
-    "[[IMG1|A cozy realistic photo of ...]] 형식으로 곧바로 이어서 쓰세요 (번호는 자리 표시와 동일하게). "
+    "그리고 그 자리 표시를 쓴 바로 다음에, 그 번호와 일치하는 정보를 "
+    "[[IMG1|짧은 한글 대체텍스트|A cozy realistic photo of ...]] 형식으로 곧바로 이어서 쓰세요 "
+    "(번호는 자리 표시와 동일하게, | 로 구분된 두 항목을 반드시 순서대로 넣을 것). "
+    "짧은 한글 대체텍스트는 그 이미지가 보여주는 내용을 10~20자 내외로, 핵심 키워드를 포함해서 "
+    "설명하는 문구입니다(예: 'MBP 콘드로이친 비교표' — 이미지 업로드 시 대체텍스트(alt)로 그대로 쓸 것이라 "
+    "실제로 검색엔진이 읽는 텍스트이므로 정확하고 구체적으로 쓰세요). 그 뒤에 오는 두 번째 항목이 "
+    "영어 이미지 생성 프롬프트입니다. "
     "이 [[IMG...]] 표시는 최종 결과물에서 자동으로 제거되니 문장 흐름 신경 쓰지 말고 그냥 붙여 쓰면 됩니다. "
     "글 전체를 다 쓴 뒤에 따로 모아서 목록을 만들지 말고, 반드시 그 섹션을 쓰는 바로 그 순간에 함께 "
     "적으세요 — 나중에 기억을 더듬어 목록으로 따로 정리하면, 실제로 그 자리에 쓴 내용과 다른 엉뚱한 "
@@ -403,6 +408,18 @@ def wikipedia_search(topic, limit=3):
     return results
 
 
+def _sanitize_for_prompt(text, max_len=3000):
+    """검색 스니펫에 가끔 섞여 들어오는 제어문자나 깨진 서로게이트 문자를 제거하고 길이를 제한한다.
+    이런 문자가 그대로 Gemini에 들어가면 이유를 짐작하기 힘든 400 INVALID_ARGUMENT가 나는 경우가 있다."""
+    if not text:
+        return text
+    cleaned = "".join(
+        ch for ch in text
+        if ch in ("\n", "\t") or (ord(ch) >= 32 and not (0xD800 <= ord(ch) <= 0xDFFF))
+    )
+    return cleaned[:max_len]
+
+
 def free_research(topic, naver_id, naver_secret):
     """비용 없는 검색(네이버 오픈API 우선, 자격증명 없거나 결과 없으면 위키백과)으로 자료를 모은다.
     반환: (합쳐진 텍스트, 출처 리스트[{title, link}], 에러메시지 or None) — grounded_search()와
@@ -458,6 +475,7 @@ def plan_health_product_post(client, product_name, naver_id, naver_secret):
     research_text, sources, research_err = free_research(product_name, naver_id, naver_secret)
     if not research_text:
         return [], "", [], research_err or "관련 자료를 찾지 못했어요."
+    research_text = _sanitize_for_prompt(research_text)
 
     prompt = (
         f"'{product_name}'이라는 건강기능식품(또는 관련 성분)이 최근 홈쇼핑/TV 방송에 나왔어. "
@@ -479,7 +497,20 @@ def plan_health_product_post(client, product_name, naver_id, naver_secret):
         ))
         raw = (resp.text or "").strip()
     except Exception as e:
-        return [], "", sources, str(e)
+        err_str = str(e)
+        if "INVALID_ARGUMENT" in err_str:
+            # 400 INVALID_ARGUMENT는 429/503과 달리 재시도해도 똑같이 나는 게 보통이지만,
+            # thinking_config 조합이나 이 특정 프롬프트 내용이 원인일 수 있어 설정을 최소화해서
+            # 한 번 더 시도해본다 (같은 모델·같은 프롬프트, thinking_config만 제거).
+            try:
+                resp = _generate_with_retry(client, contents=prompt, config=types.GenerateContentConfig(
+                    max_output_tokens=1536, temperature=0.3,
+                ))
+                raw = (resp.text or "").strip()
+            except Exception as e2:
+                return [], "", sources, str(e2)
+        else:
+            return [], "", sources, err_str
 
     titles = []
     for i in (1, 2, 3):
@@ -535,7 +566,7 @@ def normalize_image_markers(content, images, fmt):
     맨 텍스트 [이미지N]만 출력했을 때, 항상 일관된 스타일 박스로 보정한다."""
     if fmt != "html":
         return content
-    for label, _ in images:
+    for label, _, _ in images:
         marker = f"[{label}]"
         already_ok = re.search(
             rf'<div class="jb-img-slot"[^>]*>🖼️\s*{re.escape(marker)}\s*이 자리에 이미지를 삽입하세요\s*</div>',
@@ -601,7 +632,7 @@ CTA 안내: {cta_note}
 (쉼표로 구분한 태그 5~7개)
 ###CONTENT###
 (완성된 본문 — html 카테고리는 jb-post로 시작하는 HTML, text 카테고리는 순수 텍스트.
-이미지 자리 표시 [이미지N] 바로 뒤에 [[IMGN|영어 프롬프트]]를 그 자리에서 바로 이어서 쓸 것 —
+이미지 자리 표시 [이미지N] 바로 뒤에 [[IMGN|짧은 한글 대체텍스트|영어 프롬프트]]를 그 자리에서 바로 이어서 쓸 것 —
 글을 다 쓰고 나서 따로 모아 적지 말 것)
 ###THUMBNAIL###
 (글 전체를 대표하는 썸네일 이미지의 영어 프롬프트 한 줄, 자리 표시 번호 없이 프롬프트만)
@@ -660,12 +691,21 @@ CTA 안내: {cta_note}
         content = raw.split("###CONTENT###")[-1]
     content = re.sub(r"```html|```", "", content).strip()
 
-    # 이미지 프롬프트는 이제 본문을 쓰는 그 순간, 자리 표시 바로 뒤에 [[IMGN|프롬프트]]로 인라인
-    # 삽입된다 (글을 다 쓴 뒤 따로 모아 적지 않음 — 그래야 실제 그 자리 내용과 어긋나지 않는다).
+    # 이미지 프롬프트는 이제 본문을 쓰는 그 순간, 자리 표시 바로 뒤에 [[IMGN|한글 대체텍스트|영어 프롬프트]]로
+    # 인라인 삽입된다 (글을 다 쓴 뒤 따로 모아 적지 않음 — 그래야 실제 그 자리 내용과 어긋나지 않는다).
     # 여기서 그걸 뽑아내고, 최종 본문에서는 이 표시를 지운다.
-    raw_image_matches = re.findall(r"\[\[IMG(\d+)\|(.*?)\]\]", content, flags=re.DOTALL)
-    images = [(f"이미지{num}", prompt.strip()) for num, prompt in raw_image_matches]
+    # images: [(라벨, 한글 대체텍스트, 영어 프롬프트), ...]
+    # 3필드 형식([[IMGN|한글 대체텍스트|영어 프롬프트]])을 먼저 파싱하고 본문에서 제거한 뒤,
+    # 혹시 모델이 일부를 예전 2필드 형식([[IMGN|프롬프트]])으로 남겼으면 남은 것도 마저 처리한다
+    # (섞여 나와도 [[IMG...]] 표시가 본문에 그대로 남지 않도록 하기 위한 이중 안전장치).
+    images = []
+    for num, alt, prompt in re.findall(r"\[\[IMG(\d+)\|(.*?)\|(.*?)\]\]", content, flags=re.DOTALL):
+        images.append((f"이미지{num}", alt.strip(), prompt.strip()))
+    content = re.sub(r"\[\[IMG\d+\|.*?\|.*?\]\]", "", content, flags=re.DOTALL)
+    for num, prompt in re.findall(r"\[\[IMG(\d+)\|(.*?)\]\]", content, flags=re.DOTALL):
+        images.append((f"이미지{num}", "", prompt.strip()))
     content = re.sub(r"\[\[IMG\d+\|.*?\]\]", "", content, flags=re.DOTALL)
+    images.sort(key=lambda t: int(t[0].replace("이미지", "")))
     content = normalize_image_markers(content, images, cfg["format"])
 
     thumbnail_prompt = extract_between(raw, "###THUMBNAIL###", "###END###") if "###THUMBNAIL###" in raw else ""
@@ -700,6 +740,22 @@ CTA 안내: {cta_note}
     if cfg["format"] == "html":
         ad_code = st.session_state.get("adsense_code", "").strip()
         loader, unit_code = split_adsense_code(ad_code)
+
+        # 모델이 지침(AD_SLOT_RULES)대로 <!--AD_SLOT--> 마커를 3번 못 채우는 경우가 있어서
+        # (다른 필수 요소가 자동 보정되는 것과 같은 방식으로) 부족한 만큼 소제목 사이사이에
+        # 자동으로 보충해 최소 개수를 보장한다.
+        if ad_code:
+            existing = content.count("<!--AD_SLOT-->")
+            need = 3 - existing
+            if need > 0:
+                headings = [m.start() for m in re.finditer(r'<div class="jb-h2"', content)]
+                usable = headings[1:] if len(headings) > 1 else headings  # 첫 소제목 앞은 건드리지 않음
+                if usable:
+                    step = max(1, len(usable) // (need + 1))
+                    picks = sorted({usable[min(i * step, len(usable) - 1)] for i in range(1, need + 1)}, reverse=True)
+                    for pos in picks:
+                        content = content[:pos] + "<!--AD_SLOT-->\n" + content[pos:]
+
         slot_index = 0
 
         def _ad_replace(_match):
@@ -1077,8 +1133,11 @@ with col_output:
         if result.get("images"):
             st.subheader("🖼️ 본문 이미지 생성 프롬프트")
             st.caption("아래 프롬프트를 복사해서 Google Flow(또는 다른 이미지 생성 도구)에 붙여넣고, "
-                       "마음에 드는 이미지를 골라 본문의 같은 번호 [이미지N] 자리에 넣어주세요.")
-            for label, prompt in result["images"]:
+                       "마음에 드는 이미지를 골라 본문의 같은 번호 [이미지N] 자리에 넣어주세요. "
+                       "대체텍스트는 이미지를 티스토리에 업로드할 때 '대체 텍스트(alt)' 칸에 그대로 붙여넣으면 됩니다.")
+            for label, alt, prompt in result["images"]:
+                if alt:
+                    st.markdown(f"**{label} 대체텍스트:** {alt}")
                 st.code(f"[{label}] {prompt}", language=None)
     else:
         st.info("왼쪽에서 카테고리와 주제를 입력하고 생성 버튼을 누르면 결과가 여기에 표시됩니다.")
@@ -1188,7 +1247,9 @@ with st.expander("📅 여러 주제 한 번에 생성 (배치 — 30일치/1주
                     st.code(r["thumbnail_prompt"], language=None)
                 if r.get("images"):
                     st.caption("🖼️ 본문 이미지 생성 프롬프트")
-                    for label, prompt in r["images"]:
+                    for label, alt, prompt in r["images"]:
+                        if alt:
+                            st.markdown(f"**{label} 대체텍스트:** {alt}")
                         st.code(f"[{label}] {prompt}", language=None)
                 if r["format"] == "html":
                     st.code(r["content"], language="html")
