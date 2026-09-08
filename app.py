@@ -51,8 +51,13 @@ AD_SLOT_RULES = (
 # 이미지 생성 프롬프트 규칙 (모든 카테고리 공통 — 실제 이미지는 생성하지 않고, 자리 표시 + 영어 프롬프트만 제공)
 IMAGE_PROMPT_RULES = (
     "소제목(섹션) 하나당 이미지 1개씩, 보통 4~6개 정도가 적당합니다. 이미지가 들어가면 좋을 자리마다 "
-    "본문에 [이미지1], [이미지2]처럼 번호가 매겨진 자리 표시를 넣고, 그 번호와 정확히 일치하는 영어 이미지 생성 "
-    "프롬프트를 본문과 별도로 ###IMAGES### 섹션에 한 줄씩 작성하세요 (예: [이미지1] A cozy realistic photo of ...). "
+    "본문에 [이미지1], [이미지2]처럼 번호가 매겨진 자리 표시를 넣으세요. "
+    "그리고 그 자리 표시를 쓴 바로 다음에, 그 번호와 일치하는 영어 이미지 생성 프롬프트를 "
+    "[[IMG1|A cozy realistic photo of ...]] 형식으로 곧바로 이어서 쓰세요 (번호는 자리 표시와 동일하게). "
+    "이 [[IMG...]] 표시는 최종 결과물에서 자동으로 제거되니 문장 흐름 신경 쓰지 말고 그냥 붙여 쓰면 됩니다. "
+    "글 전체를 다 쓴 뒤에 따로 모아서 목록을 만들지 말고, 반드시 그 섹션을 쓰는 바로 그 순간에 함께 "
+    "적으세요 — 나중에 기억을 더듬어 목록으로 따로 정리하면, 실제로 그 자리에 쓴 내용과 다른 엉뚱한 "
+    "이미지 프롬프트가 나오기 쉽습니다. "
     "가장 중요한 규칙: 각 프롬프트는 글 전체의 막연한 주제나 분위기가 아니라, 그 자리 바로 앞뒤 문단이 실제로 "
     "다루는 구체적인 내용을 시각적으로 표현해야 합니다. 예를 들어 '원인/문제 상황'을 설명하는 섹션이면 그 원인이 "
     "되는 구체적 장면(예: 야근하며 커피 마시는 모습, 정크푸드)을 묘사하고, '비교'를 다루는 섹션이면 비교 대상 "
@@ -609,9 +614,9 @@ CTA 안내: {cta_note}
 ###TAGS###
 (쉼표로 구분한 태그 5~7개)
 ###CONTENT###
-(완성된 본문 — html 카테고리는 jb-post로 시작하는 HTML, text 카테고리는 순수 텍스트)
-###IMAGES###
-([이미지N] 영어 프롬프트 형식으로 한 줄씩, 본문의 자리 표시 번호와 일치)
+(완성된 본문 — html 카테고리는 jb-post로 시작하는 HTML, text 카테고리는 순수 텍스트.
+이미지 자리 표시 [이미지N] 바로 뒤에 [[IMGN|영어 프롬프트]]를 그 자리에서 바로 이어서 쓸 것 —
+글을 다 쓰고 나서 따로 모아 적지 말 것)
 ###THUMBNAIL###
 (글 전체를 대표하는 썸네일 이미지의 영어 프롬프트 한 줄, 자리 표시 번호 없이 프롬프트만)
 ###END###
@@ -663,15 +668,18 @@ CTA 안내: {cta_note}
     title = extract_between(raw, "###TITLE###", "###META###")
     meta = extract_between(raw, "###META###", "###TAGS###")
     tags = extract_between(raw, "###TAGS###", "###CONTENT###")
-    content_end = "###IMAGES###" if "###IMAGES###" in raw else "###END###"
+    content_end = "###THUMBNAIL###" if "###THUMBNAIL###" in raw else "###END###"
     content = extract_between(raw, "###CONTENT###", content_end)
     if not content:
         content = raw.split("###CONTENT###")[-1]
     content = re.sub(r"```html|```", "", content).strip()
 
-    images_end = "###THUMBNAIL###" if "###THUMBNAIL###" in raw else "###END###"
-    images_raw = extract_between(raw, "###IMAGES###", images_end) if "###IMAGES###" in raw else ""
-    images = re.findall(r"\[(이미지\d+)\]\s*(.+)", images_raw)
+    # 이미지 프롬프트는 이제 본문을 쓰는 그 순간, 자리 표시 바로 뒤에 [[IMGN|프롬프트]]로 인라인
+    # 삽입된다 (글을 다 쓴 뒤 따로 모아 적지 않음 — 그래야 실제 그 자리 내용과 어긋나지 않는다).
+    # 여기서 그걸 뽑아내고, 최종 본문에서는 이 표시를 지운다.
+    raw_image_matches = re.findall(r"\[\[IMG(\d+)\|(.*?)\]\]", content, flags=re.DOTALL)
+    images = [(f"이미지{num}", prompt.strip()) for num, prompt in raw_image_matches]
+    content = re.sub(r"\[\[IMG\d+\|.*?\]\]", "", content, flags=re.DOTALL)
     content = normalize_image_markers(content, images, cfg["format"])
 
     thumbnail_prompt = extract_between(raw, "###THUMBNAIL###", "###END###") if "###THUMBNAIL###" in raw else ""
