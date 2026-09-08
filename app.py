@@ -56,23 +56,25 @@ IMAGE_PROMPT_RULES = (
     "소제목(섹션) 하나당 이미지 1개씩, 보통 4~6개 정도가 적당합니다. 이미지가 들어가면 좋을 자리마다 "
     "본문에 [이미지1], [이미지2]처럼 번호가 매겨진 자리 표시를 넣으세요. "
     "그리고 그 자리 표시를 쓴 바로 다음에, 그 번호와 일치하는 정보를 "
-    "[[IMG1|짧은 한글 대체텍스트|A cozy realistic photo of ...]] 형식으로 곧바로 이어서 쓰세요 "
+    "[[IMG1|짧은 한글 대체텍스트|영어 이미지 생성 프롬프트]] 형식으로 곧바로 이어서 쓰세요 "
     "(번호는 자리 표시와 동일하게, | 로 구분된 두 항목을 반드시 순서대로 넣을 것). "
     "짧은 한글 대체텍스트는 그 이미지가 보여주는 내용을 10~20자 내외로, 핵심 키워드를 포함해서 "
     "설명하는 문구입니다(예: 'MBP 콘드로이친 비교표' — 이미지 업로드 시 대체텍스트(alt)로 그대로 쓸 것이라 "
     "실제로 검색엔진이 읽는 텍스트이므로 정확하고 구체적으로 쓰세요). 그 뒤에 오는 두 번째 항목이 "
-    "영어 이미지 생성 프롬프트입니다. "
+    "영어 이미지 생성 프롬프트이며, 사실적인 사진 스타일로 피사체·구도·조명·분위기를 구체적으로 묘사하세요. "
     "이 [[IMG...]] 표시는 최종 결과물에서 자동으로 제거되니 문장 흐름 신경 쓰지 말고 그냥 붙여 쓰면 됩니다. "
     "글 전체를 다 쓴 뒤에 따로 모아서 목록을 만들지 말고, 반드시 그 섹션을 쓰는 바로 그 순간에 함께 "
     "적으세요 — 나중에 기억을 더듬어 목록으로 따로 정리하면, 실제로 그 자리에 쓴 내용과 다른 엉뚱한 "
     "이미지 프롬프트가 나오기 쉽습니다. "
     "가장 중요한 규칙: 각 프롬프트는 글 전체의 막연한 주제나 분위기가 아니라, 그 자리 바로 앞뒤 문단이 실제로 "
-    "다루는 구체적인 내용을 시각적으로 표현해야 합니다. 예를 들어 '원인/문제 상황'을 설명하는 섹션이면 그 원인이 "
-    "되는 구체적 장면(예: 야근하며 커피 마시는 모습, 정크푸드)을 묘사하고, '비교'를 다루는 섹션이면 비교 대상 "
-    "두 가지를 한 프레임에 담고, '실천 방법/섭취 팁'이면 그 행동을 직접 하는 장면을, '주의사항/경고'면 "
-    "신중하거나 걱정스러운 톤의 장면을 묘사하세요. 같은 건강기능식품/웰빙 주제라도 섹션마다 이미지가 서로 "
-    "명확히 구별되어야 하며, 여러 섹션에 비슷비슷한 '건강한 라이프스타일' 사진을 재탕하듯 쓰지 마세요. "
-    "프롬프트는 사실적인 사진 스타일로 피사체·구도·조명·분위기를 구체적으로 묘사하세요. "
+    "언급하는 구체적인 명사·행위·수치를 시각적으로 표현해야 합니다 — 그 문단에 나온 성분명, 신체 부위, "
+    "제품/도구, 특정 수치나 비교 대상, 구체적 장소·상황처럼 그 문단만의 디테일을 그대로 그림으로 옮기세요. "
+    "절대 하지 말 것: '스트레칭/산책하는 사람', '과일·채소가 놓인 식탁', '우유 한 잔', '인삼/뿌리채소가 "
+    "놓인 사진'처럼 건강·웰빙 콘텐츠에서 흔히 쓰이는 클리셰 이미지를 그 문단 내용과 상관없이 기본값처럼 "
+    "반복해서 쓰지 마세요. 이런 소재는 그 문단이 실제로 그 정확한 대상(예: 그 특정 성분, 그 특정 운동법)을 "
+    "다룰 때만 등장해야 하고, 그마저도 클로즈업/각도/배경/구성을 매번 다르게 해서 뻔한 스톡사진처럼 보이지 "
+    "않게 하세요. 섹션마다 시각적으로 확실히 구별되어야 하며, 같은 글 안에서 비슷한 구도·소재의 사진이 "
+    "두 번 이상 반복되면 안 됩니다. "
     "이와 별도로, 글 전체를 대표해서 목록/썸네일에서 클릭을 유도할 썸네일 이미지 프롬프트도 하나 작성해서 "
     "###THUMBNAIL### 섹션에 작성하세요. 썸네일은 제목의 핵심 주제를 한눈에 보여주는 구도로, "
     "정사각형(1:1) 또는 4:3 비율에 어울리게 피사체를 중앙에 크게 배치하고, 텍스트 오버레이 없이 "
@@ -306,11 +308,12 @@ def get_client():
 
 RESEARCH_MODEL_FALLBACKS = ("gemini-flash-latest", "gemini-flash-lite-latest")
 
-# 429(RESOURCE_EXHAUSTED, 할당량 초과)와 503(UNAVAILABLE, 구글 서버 일시 과부하)은 둘 다
-# "지금 이 순간만" 문제인 경우가 많아서, 무료 티어에서 짧은 시간에 요청이 몰릴 때 특히 잘 납니다.
+# 429(RESOURCE_EXHAUSTED, 할당량 초과), 503(UNAVAILABLE, 구글 서버 일시 과부하),
+# 500(INTERNAL, 구글 서버 내부 일시 오류)은 모두 "지금 이 순간만" 문제인 경우가 많아서,
+# 무료 티어에서 짧은 시간에 요청이 몰릴 때 특히 잘 납니다.
 # 모델을 즉시 바꾸는 것만으로는 안 되는 경우(양쪽 모델이 동시에 과부하)가 있어서,
 # 잠깐 대기했다가 재시도하는 로직을 별도로 둡니다.
-_TRANSIENT_MARKERS = ("429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE")
+_TRANSIENT_MARKERS = ("429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE", "500", "INTERNAL")
 
 
 def _is_transient_error(err_str: str) -> bool:
@@ -594,11 +597,12 @@ def extract_between(text, start_marker, end_marker):
     return (text[frm:] if e == -1 else text[frm:e]).strip()
 
 
-def generate_post(client, mode, topic, link1, link2, tone_key, length_key, extra, research_block="", seo_notes="", fixed_title=""):
+def generate_post(client, mode, topic, link1, link2, tone_key, length_key, extra, research_block="", seo_notes="", fixed_title="", output_format=None):
     cfg = MODE_CONFIG[mode]
+    fmt = output_format or cfg["format"]  # 카테고리 기본 형식을 호출부에서 티스토리/네이버로 바꿔 지정할 수 있게 함
     tone = TONE_OPTIONS[tone_key]
     length = LENGTH_OPTIONS[length_key]
-    rules_doc = SKIN_CLASSES_DOC if cfg["format"] == "html" else TEXT_RULES_DOC
+    rules_doc = SKIN_CLASSES_DOC if fmt == "html" else TEXT_RULES_DOC
 
     link_desc = f"링크1: {link1}" if cfg["link_mode"] == "single" else f"링크1(신청): {link1}\n링크2(자격조회): {link2}"
     has_real_link = link1 != "[링크 입력]"
@@ -709,7 +713,7 @@ CTA 안내: {cta_note}
         images.append((f"이미지{num}", "", prompt.strip()))
     content = re.sub(r"\[\[IMG\d+\|.*?\]\]", "", content, flags=re.DOTALL)
     images.sort(key=lambda t: int(t[0].replace("이미지", "")))
-    content = normalize_image_markers(content, images, cfg["format"])
+    content = normalize_image_markers(content, images, fmt)
 
     thumbnail_prompt = extract_between(raw, "###THUMBNAIL###", "###END###") if "###THUMBNAIL###" in raw else ""
     thumbnail_prompt = thumbnail_prompt.strip()
@@ -717,13 +721,19 @@ CTA 안내: {cta_note}
     if mode == "쿠팡파트너스" and DISCLOSURE_TEXT not in content:
         content = DISCLOSURE_TEXT + "\n\n" + content
     if mode == "건강정보" and has_real_link and DISCLOSURE_TEXT not in content:
-        content = f'<p style="font-size:13px;color:#8B8371;">{DISCLOSURE_TEXT}</p>' + content
+        if fmt == "html":
+            content = f'<p style="font-size:13px;color:#8B8371;">{DISCLOSURE_TEXT}</p>' + content
+        else:
+            content = DISCLOSURE_TEXT + "\n\n" + content
     if mode == "건강정보" and HEALTH_DISCLAIMER not in content:
-        content += (
-            '<div class="jb-tip" style="background:#EAF7F3;border-left:4px solid #1F6F63;'
-            'border-radius:0 10px 10px 0;padding:13px 16px;margin:12px 0;font-size:14.5px;'
-            f'color:#184E46;line-height:1.7;"><b style="color:#0F3A33;">안내</b> {HEALTH_DISCLAIMER}</div>'
-        )
+        if fmt == "html":
+            content += (
+                '<div class="jb-tip" style="background:#EAF7F3;border-left:4px solid #1F6F63;'
+                'border-radius:0 10px 10px 0;padding:13px 16px;margin:12px 0;font-size:14.5px;'
+                f'color:#184E46;line-height:1.7;"><b style="color:#0F3A33;">안내</b> {HEALTH_DISCLAIMER}</div>'
+            )
+        else:
+            content += f"\n\n⚠️ {HEALTH_DISCLAIMER}"
 
     def split_adsense_code(raw_code):
         """전체 애드센스 코드에서 라이브러리 로더(<script ...adsbygoogle.js...>)와
@@ -738,9 +748,9 @@ CTA 안내: {cta_note}
         unit_code = raw_code.replace(loader, "", 1).strip() if loader else raw_code.strip()
         return loader, unit_code
 
-    # 애드센스 광고 자동 삽입 (html 카테고리만 해당)
+    # 애드센스 광고 자동 삽입 (html 형식으로 생성했을 때만 해당)
     html_repaired = False
-    if cfg["format"] == "html":
+    if fmt == "html":
         ad_code = st.session_state.get("adsense_code", "").strip()
         loader, unit_code = split_adsense_code(ad_code)
 
@@ -783,7 +793,8 @@ CTA 안내: {cta_note}
     return title, meta, tags, content, images, thumbnail_prompt, html_repaired
 
 
-def run_seo_check(mode, cfg, topic, title, meta, tags, content, images):
+def run_seo_check(mode, cfg, topic, title, meta, tags, content, images, fmt=None):
+    fmt = fmt or cfg["format"]
     checks = []
     plain = re.sub(r"<[^>]+>", " ", content)
 
@@ -813,7 +824,7 @@ def run_seo_check(mode, cfg, topic, title, meta, tags, content, images):
         f"55자 초과 문장 비율 {long_ratio:.0%}",
     ))
 
-    if cfg["format"] == "html":
+    if fmt == "html":
         h2_count = content.count("jb-h2")
         checks.append(("소제목 개수", "ok" if 4 <= h2_count <= 7 else "warn", f"jb-h2 {h2_count}개"))
         cta_count = content.count("jb-cta\"")
@@ -859,7 +870,8 @@ def run_seo_check(mode, cfg, topic, title, meta, tags, content, images):
 # UI
 # ────────────────────────────────────────────────────────────────
 st.title("📝 포스트팩토리 — SEO 블로그 자동작성")
-st.caption("지원금 · 축제 · 일반 · 건강정보(티스토리 HTML) + 쿠팡파트너스(네이버 텍스트)를 자동 생성합니다")
+st.caption("지원금 · 축제 · 일반 · 건강정보는 출력 형식(티스토리 HTML / 네이버 텍스트)을 선택할 수 있고, "
+           "쿠팡파트너스는 항상 네이버 텍스트로 생성합니다")
 
 client = get_client()
 if client is None:
@@ -1012,6 +1024,16 @@ with col_input:
         if mode == "쿠팡파트너스":
             st.caption("⚠️ 쿠팡 파트너스 이용약관상 링크는 실제 발급받은 파트너스 링크만 사용해야 합니다.")
 
+    if mode == "쿠팡파트너스":
+        output_format = "text"  # 쿠팡파트너스는 항상 네이버 텍스트 형식 고정
+    else:
+        fmt_label = st.radio(
+            "출력 형식", ["티스토리 (HTML)", "네이버 블로그 (텍스트)"], horizontal=True,
+            help="'네이버 블로그(텍스트)'를 고르면 이 카테고리의 리서치·사실관계 규칙은 그대로 유지하면서 "
+                 "HTML 태그 없는 순수 텍스트로, 이미지/링크 자리 표시도 네이버 에디터에 맞게 바뀝니다.",
+        )
+        output_format = "html" if fmt_label.startswith("티스토리") else "text"
+
     c1, c2 = st.columns(2)
     with c1:
         tone_key = st.selectbox("말투", list(TONE_OPTIONS.keys()))
@@ -1037,7 +1059,7 @@ with col_output:
         else:
             resolved_link1, resolved_link2 = link1_in.strip(), link2_in.strip()
             auto_used = []
-            if cfg["format"] == "html":
+            if mode != "쿠팡파트너스":  # 쿠팡파트너스만 실제 발급받은 제휴 링크가 필수라 자동 검색 대상에서 제외
                 if not resolved_link1:
                     found, err = search_official_link(topic.strip(), naver_id, naver_secret)
                     if found:
@@ -1072,12 +1094,13 @@ with col_output:
                         tone_key, length_key, extra.strip(), research_block,
                         st.session_state.get("seo_extra_notes", ""),
                         st.session_state.get("fixed_title", ""),
+                        output_format,
                     )
-                    checks = run_seo_check(mode, cfg, topic.strip(), title, meta, tags, content, images)
+                    checks = run_seo_check(mode, cfg, topic.strip(), title, meta, tags, content, images, output_format)
 
                     st.session_state["result"] = {
                         "title": title, "meta": meta, "tags": tags,
-                        "content": content, "format": cfg["format"], "mode": mode,
+                        "content": content, "format": output_format, "mode": mode,
                         "checks": checks, "auto_used": auto_used, "images": images,
                         "thumbnail_prompt": thumbnail_prompt,
                         "html_repaired": html_repaired, "research_sources": research_sources,
@@ -1181,7 +1204,7 @@ with st.expander("📅 여러 주제 한 번에 생성 (배치 — 30일치/1주
                 try:
                     b_link1 = link1_in.strip()
                     b_link2 = link2_in.strip() if cfg["link_mode"] == "dual" else b_link1
-                    if cfg["format"] == "html":
+                    if mode != "쿠팡파트너스":
                         if not b_link1:
                             found, _ = search_official_link(t, naver_id, naver_secret)
                             b_link1 = found or "[링크 입력]"
@@ -1202,10 +1225,11 @@ with st.expander("📅 여러 주제 한 번에 생성 (배치 — 30일치/1주
                     title, meta, tags, content, images, thumbnail_prompt, html_repaired = generate_post(
                         client, mode, t, b_link1, b_link2, tone_key, length_key, extra.strip(),
                         b_research_block, st.session_state.get("seo_extra_notes", ""),
+                        "", output_format,
                     )
                     batch_results.append({
                         "topic": t, "title": title, "meta": meta, "tags": tags,
-                        "content": content, "format": cfg["format"], "mode": mode,
+                        "content": content, "format": output_format, "mode": mode,
                         "images": images, "thumbnail_prompt": thumbnail_prompt,
                         "sources": b_sources, "error": None,
                     })
