@@ -379,6 +379,17 @@ def grounded_search(client, query, model_name=None):
 # 애초에 프로젝트에 결제수단(카드)이 등록되어 있어야 해서, 카드 등록 전에는 첫 요청부터
 # 429(RESOURCE_EXHAUSTED)가 납니다. 아래 경로는 카드 등록 자체가 필요 없습니다.
 # ─────────────────────────────────────────────────────────────────
+def _raise_with_body(resp):
+    """requests의 raise_for_status는 에러 본문을 안 보여줘서, 네이버가 실제로 보낸 에러 메시지를
+    붙여서 다시 던집니다 — 원인 파악에 훨씬 도움이 됩니다."""
+    if resp.status_code >= 400:
+        try:
+            body = resp.json()
+        except Exception:
+            body = resp.text[:300]
+        raise requests.exceptions.HTTPError(f"{resp.status_code} 에러 — 응답 내용: {body}")
+
+
 def naver_search(query, client_id, client_secret, api="webkr", display=5):
     """네이버 검색 오픈API (NAVER API HUB, 무료 — 결제수단 등록 불필요).
     api: webkr(웹문서) 또는 encyc(백과사전). 2026년부터 옛 openapi.naver.com 방식은
@@ -386,7 +397,7 @@ def naver_search(query, client_id, client_secret, api="webkr", display=5):
     url = f"https://naverapihub.apigw.ntruss.com/search/v1/{api}"
     headers = {"X-NCP-APIGW-API-KEY-ID": client_id, "X-NCP-APIGW-API-KEY": client_secret}
     resp = requests.get(url, headers=headers, params={"query": query, "display": display}, timeout=10)
-    resp.raise_for_status()
+    _raise_with_body(resp)
     items = resp.json().get("items", [])
     return [
         {
