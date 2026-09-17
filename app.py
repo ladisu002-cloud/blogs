@@ -5,6 +5,7 @@ import random
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
+from datetime import date
 from google import genai
 from google.genai import types
 from bs4 import BeautifulSoup
@@ -13,6 +14,10 @@ from bs4 import BeautifulSoup
 # 설정
 # ────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="포스트팩토리 — SEO 블로그 자동작성", page_icon="📝", layout="wide")
+
+# 매 실행(스트림릿은 상호작용마다 스크립트를 처음부터 다시 실행하므로 항상 그 시점의 오늘 날짜)마다
+# 새로 계산됨 — "축제 모음(월별·계절)" 모드에서 진행중/예정/종료 판단 기준으로 프롬프트에 주입한다.
+TODAY = date.today().strftime("%Y년 %m월 %d일")
 
 QUALITY_RULES = (
     "모바일 가독성을 위해 한 문장은 평균 40~50자 이내로 짧게 끊고, 2~4문장마다 문단을 나누세요. "
@@ -116,6 +121,39 @@ MODE_CONFIG = {
             "반드시 jb-spot-list 카드 목록(아이콘 + 짧은 이름 + 1~2문장 설명)으로 3~4개씩 작성하세요. "
             "그 다음 기본 정보(기간/장소/교통/주차) → 방문 꿀팁 → 함께 즐기면 좋은 다른 행사 순으로 구성하세요. "
             "CTA 버튼은 정확히 2번, 같은 링크로 '공식 홈페이지 바로가기👆' 텍스트를 사용하세요. "
+            + QUALITY_RULES + " " + STYLE_GUIDE + " " + AD_SLOT_RULES + " " + IMAGE_PROMPT_RULES
+        ),
+    },
+    "축제 모음(월별·계절)": {
+        "format": "html",
+        "topic_label": "월/계절 + 지역(선택)",
+        "topic_placeholder": "예: 10월 전국, 겨울 강원도, 5월 서울/경기",
+        "link_mode": "single",
+        "link1_label": "참고 링크 (선택 — 비워두면 CTA 버튼 없이 생성)",
+        "system": (
+            "당신은 20년차 SEO 전문가이자 국내 여행·축제 콘텐츠 큐레이터입니다. "
+            "독자는 특정 축제 하나가 아니라 '이번 달/이번 계절에 어디 가볼까'를 찾아 검색해 들어온 사람입니다. "
+            f"오늘은 {TODAY}입니다. 이 날짜를 기준으로 아래 규칙을 반드시 지키세요. "
+            "입력된 월/계절/지역 조건에 맞는, 리서치 자료에서 실제로 확인되는 국내 축제·행사만 5~8개 선정하세요. "
+            "리서치 자료에 없는 축제·행사는 지어내지 마세요 — 확인되는 게 5개 미만이면 그 개수만큼만 쓰는 게 "
+            "지어내는 것보다 낫습니다. "
+            "각 축제의 진행 상태를 오늘 날짜 기준으로 판단하세요: 리서치 자료로 이미 끝난 지 오래된 것으로 "
+            "확인되면 아예 목록에서 빼세요(안 끝난 것처럼 헷갈리게 쓰지 마세요). 오늘 기준 기간 안이면 "
+            "'진행중' 상태로, 아직 시작 전이면 '예정' 상태로 표시하세요. 정확한 날짜를 못 찾았으면 상태를 "
+            "단정하지 말고 그냥 '{월/계절}에 열리는 축제'처럼 시기만 언급하세요. "
+            "각 축제는 jb-spot-list 카드로 작성하고, 카드 안 이름 옆에 진행상태 뱃지를 붙이세요: "
+            "진행중이면 <span style=\"display:inline-block;font-size:11px;font-weight:700;color:#fff;"
+            "background:#1F6F63;padding:2px 8px;border-radius:10px;margin-left:6px;vertical-align:middle;\">"
+            "진행중</span>, 예정이면 같은 형식에서 background만 #2F5FA3로 바꾸고 글자를 '예정'으로 하세요. "
+            "상태를 단정할 수 없는 축제는 뱃지를 아예 붙이지 마세요. "
+            "구성 순서: 도입부(이 시기에 어디 갈지 고민되는 상황 공감) → 전체 한눈에 보기 표(jb-table, "
+            "열: 축제명/지역/시기) → 축제별 jb-spot-list 카드(기간·장소·볼거리·한줄팁) → 함께 챙기면 좋은 "
+            "여행 팁(jb-tip) → Q&A 순으로 구성하세요. "
+            "지역이 입력되지 않았으면 전국 기준으로 지역을 고루 섞고, 지역이 입력됐으면 그 지역 축제 위주로 "
+            "선정하세요. "
+            "CTA 버튼은 링크가 있을 때만 정확히 1회 사용하고, 특정 축제 하나를 홍보하는 문구가 아니라 "
+            "'국내 여행 정보 더 보기👆'처럼 글 전체를 아우르는 문구를 쓰세요(여러 축제를 다루는 글이므로 "
+            "특정 축제 하나로 좁힌 문구는 부적절합니다). "
             + QUALITY_RULES + " " + STYLE_GUIDE + " " + AD_SLOT_RULES + " " + IMAGE_PROMPT_RULES
         ),
     },
@@ -518,21 +556,93 @@ def plan_health_product_post(client, product_name, naver_id, naver_secret):
         else:
             return [], "", sources, err_str
 
-    titles = []
-    for i in (1, 2, 3):
-        m = re.search(rf"제목\s*{i}\s*[:：]\s*(.+)", raw)
-        if m:
-            t = m.group(1).strip().strip("*").strip()
-            if t:
-                titles.append(t)
-    if not titles:
-        # 혹시 모델이 "제목:" 한 줄 형식으로만 답했을 때를 위한 하위 호환
-        m = re.search(r"제목\s*[:：]\s*(.+)", raw)
-        if m:
-            titles = [m.group(1).strip().strip("*").strip()]
-    point_m = re.search(r"포인트\s*[:：]\s*(.+)", raw, flags=re.DOTALL)
-    point_text = point_m.group(1).strip() if point_m else (raw if not titles else "")
     return titles, point_text, sources, None
+
+
+def generate_social_hooks(client, title, meta, plain_content, mode, post_url=""):
+    """완성된 티스토리 원고를 바탕으로 쓰레드/인스타용 후킹 카피를 만든다.
+    그라운딩 없는 순수 텍스트 생성(결제수단 없이도 동작) — plan_health_product_post와 같은 패턴.
+    쓰레드는 본문에 링크를 직접 걸 수 있지만, 인스타는 캡션에 클릭 링크를 못 넣어 프로필/스토리로
+    우회해야 한다는 두 플랫폼의 구조 차이를 프롬프트에 반영한다.
+    반환: (threads_list, instagram_scenes[(장면설명, 화면문구), ...], instagram_caption, 에러)"""
+    plain_content = _sanitize_for_prompt(plain_content, max_len=2500)
+    url_line = (
+        f"실제 게시 URL: {post_url.strip()}"
+        if post_url.strip() else
+        "아직 게시 전이라 URL을 모릅니다 — 링크 자리에는 '[여기에 티스토리 글 링크]'라고만 표시하세요."
+    )
+    prompt = (
+        "너는 이미 완성된 티스토리 블로그 글을 쓰레드(Threads)와 인스타그램에서 홍보하는 SNS 카피라이터야. "
+        "아래 글을 클릭하게 만드는 게 목적이야.\n\n"
+        f"[원문 제목] {title}\n[원문 메타설명] {meta}\n[카테고리] {mode}\n[{url_line}]\n"
+        f"[본문 요약 근거]\n{plain_content}\n\n"
+        "공통 규칙: 본문에 실제로 없는 내용을 지어내서 미끼로 걸지 마라(클릭 후 내용이 다르면 이탈·신뢰 "
+        "하락은 물론, 애드센스 '기만적 콘텐츠' 정책 위반 위험도 있다). 과장된 낚시 문구보다 '본문에 있는 "
+        "사실 자체'로 궁금증을 만들어라. 이모지는 과하지 않게.\n\n"
+        "쓰레드는 게시물 본문에 링크를 직접 걸 수 있고 미리보기 카드가 뜬다 — 짧고 강한 후킹이 핵심이다. "
+        "서로 다른 후킹 각도(반전형/숫자형/질문형 등)로 3개 버전을 써라. 각 버전은 공백포함 200자 이내로 "
+        "하고, 마지막 줄에 링크 자리를 넣어라.\n\n"
+        "인스타그램은 캡션(본문)에 클릭되는 링크를 넣을 수 없다 — 프로필 링크나 스토리 링크 스티커로 "
+        "유도해야 한다. 릴스/캐러셀 대본을 화면 4개로 설계하라(①훅 화면 ②~③정보 화면 ④CTA 화면). 각 "
+        "화면은 '화면 설명'과 '화면에 들어갈 짧은 문구'로 나눠라. 캡션도 하나 써라 — 후킹 문장 뒤에 "
+        "'프로필 링크(또는 스토리)에서 확인하세요' 식으로 도달 경로를 명확히 안내해라.\n\n"
+        "다른 설명 없이 아래 마커 형식만 그대로 채워라(각 항목은 중간에 끊기지 않게 끝까지 완성할 것):\n"
+        "###THREADS1###\n(버전1)\n###THREADS2###\n(버전2)\n###THREADS3###\n(버전3)\n"
+        "###IG_SCENE1###\n화면: (설명) | 문구: (화면 문구)\n"
+        "###IG_SCENE2###\n화면: (설명) | 문구: (화면 문구)\n"
+        "###IG_SCENE3###\n화면: (설명) | 문구: (화면 문구)\n"
+        "###IG_SCENE4###\n화면: (설명) | 문구: (화면 문구)\n"
+        "###IG_CAPTION###\n(캡션 전체)\n###END###\n"
+    )
+    try:
+        resp = _generate_with_retry(client, contents=prompt, config=types.GenerateContentConfig(
+            max_output_tokens=2048, temperature=0.9,
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
+        ))
+        raw = (resp.text or "").strip()
+    except Exception as e:
+        err_str = str(e)
+        if "INVALID_ARGUMENT" in err_str:
+            # thinking_config 조합이 원인일 수 있어 설정을 최소화해서 한 번 더 시도(plan_health_product_post와 동일 패턴).
+            try:
+                resp = _generate_with_retry(client, contents=prompt, config=types.GenerateContentConfig(
+                    max_output_tokens=2048, temperature=0.9,
+                ))
+                raw = (resp.text or "").strip()
+            except Exception as e2:
+                return [], [], "", str(e2)
+        else:
+            return [], [], "", err_str
+
+    def _between(a, b):
+        m = re.search(re.escape(a) + r"\s*(.*?)\s*(?=" + re.escape(b) + r")", raw, flags=re.DOTALL)
+        return m.group(1).strip() if m else ""
+
+    threads = [
+        _between("###THREADS1###", "###THREADS2###"),
+        _between("###THREADS2###", "###THREADS3###"),
+        _between("###THREADS3###", "###IG_SCENE1###"),
+    ]
+    threads = [t for t in threads if t]
+
+    scene_bounds = [
+        ("###IG_SCENE1###", "###IG_SCENE2###"),
+        ("###IG_SCENE2###", "###IG_SCENE3###"),
+        ("###IG_SCENE3###", "###IG_SCENE4###"),
+        ("###IG_SCENE4###", "###IG_CAPTION###"),
+    ]
+    scenes = []
+    for start, end in scene_bounds:
+        s = _between(start, end)
+        if not s:
+            continue
+        m = re.search(r"화면\s*[:：]\s*(.+?)\s*\|\s*문구\s*[:：]\s*(.+)", s, flags=re.DOTALL)
+        scenes.append((m.group(1).strip(), m.group(2).strip()) if m else (s.strip(), ""))
+
+    caption_m = re.search(r"###IG_CAPTION###\s*(.*?)\s*(?:###END###|$)", raw, flags=re.DOTALL)
+    caption = caption_m.group(1).strip() if caption_m else ""
+
+    return threads, scenes, caption, None
 
 
 def research_seo_rules(platform_hint, naver_id, naver_secret):
@@ -833,6 +943,14 @@ def run_seo_check(mode, cfg, topic, title, meta, tags, content, images, fmt=None
         if mode == "축제/행사":
             spot_count = content.count("jb-spot-item")
             checks.append(("명소/프로그램 카드", "ok" if spot_count >= 3 else "warn", f"jb-spot-item {spot_count}개"))
+        if mode == "축제 모음(월별·계절)":
+            spot_count = content.count("jb-spot-item")
+            checks.append(("축제 카드 개수", "ok" if spot_count >= 5 else "warn", f"jb-spot-item {spot_count}개 (목표 5~8개)"))
+            checks.append(("한눈에 보기 표", "ok" if "jb-table" in content else "warn",
+                            "포함" if "jb-table" in content else "미포함"))
+            status_count = content.count("진행중</span>") + content.count("예정</span>")
+            checks.append(("진행상태 뱃지", "ok" if status_count > 0 else "warn",
+                            f"{status_count}개 항목에 표시 (날짜 미확인 항목은 뱃지 없이도 정상)"))
         if mode == "건강정보":
             checks.append(("건강정보 고지 문구", "ok" if HEALTH_DISCLAIMER in content else "bad",
                             "포함" if HEALTH_DISCLAIMER in content else "누락 — 자동 보정됨"))
@@ -1165,6 +1283,47 @@ with col_output:
                 if alt:
                     st.markdown(f"**{label} 대체텍스트:** {alt}")
                 st.code(f"[{label}] {prompt}", language=None)
+
+        st.divider()
+        st.subheader("🧵 쓰레드 · 인스타 후킹 카피")
+        st.caption("완성된 원고를 근거로 쓰레드/인스타 홍보 카피를 만듭니다. 본문에 없는 내용을 지어내 "
+                   "미끼로 걸지 않도록 원고 내용만 근거로 생성해요. 쓰레드는 링크를 직접 걸고, "
+                   "인스타는 캡션에 링크를 못 넣는 구조 차이를 반영해서 따로 만들어요.")
+        post_url_input = st.text_input(
+            "게시된 티스토리 글 URL (선택 — 비워두면 링크 자리표시로 생성됩니다)",
+            key="social_post_url",
+        )
+        if st.button("후킹 카피 생성", key="gen_social_hooks_btn"):
+            if client is None:
+                st.error("Google API 키가 필요합니다.")
+            else:
+                with st.spinner("쓰레드·인스타 카피 작성 중…"):
+                    plain_for_hook = re.sub(r"<[^>]+>", " ", result["content"])
+                    plain_for_hook = re.sub(r"\s+", " ", plain_for_hook).strip()
+                    threads, scenes, caption, hook_err = generate_social_hooks(
+                        client, result["title"], result["meta"], plain_for_hook,
+                        result["mode"], post_url_input,
+                    )
+                    if hook_err:
+                        st.error(f"후킹 카피 생성 중 오류: {hook_err}")
+                    else:
+                        st.session_state["social_hooks"] = {
+                            "threads": threads, "scenes": scenes, "caption": caption,
+                        }
+
+        social_hooks = st.session_state.get("social_hooks")
+        if social_hooks:
+            if social_hooks["threads"]:
+                st.markdown("**쓰레드용 (서로 다른 후킹 각도 3개)**")
+                for t in social_hooks["threads"]:
+                    st.code(t, language=None)
+            if social_hooks["scenes"]:
+                st.markdown("**인스타그램 릴스·캐러셀 대본**")
+                for i, (scene_desc, scene_text) in enumerate(social_hooks["scenes"], 1):
+                    st.markdown(f"{i}. **{scene_desc}** — {scene_text}")
+            if social_hooks["caption"]:
+                st.markdown("**인스타그램 캡션** (프로필 링크/스토리로 유도)")
+                st.code(social_hooks["caption"], language=None)
     else:
         st.info("왼쪽에서 카테고리와 주제를 입력하고 생성 버튼을 누르면 결과가 여기에 표시됩니다.")
 
