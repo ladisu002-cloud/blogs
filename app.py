@@ -174,20 +174,22 @@ MODE_CONFIG = {
         ),
     },
     "쿠팡파트너스": {
-        "format": "text",
+        "format": "html",
         "topic_label": "상품/카테고리명",
         "topic_placeholder": "예: 무선 청소기 추천",
         "link_mode": "single",
         "link1_label": "쿠팡 파트너스 링크",
         "system": (
             "당신은 20년차 SEO 전문가이자 쿠팡 파트너스 제휴 마케팅 콘텐츠 작가입니다. "
-            "네이버 블로그에 그대로 붙여넣을 순수 텍스트(HTML 태그 없음)로 작성합니다. "
-            "구조는 서론(공감 유도 + 파트너스 링크 자리 1회) → 상품별 분석(장단점을 솔직하게, "
-            "스펙 비교는 '항목: 설명' 형태의 줄글로) → 결론(핵심 요약 + 링크 자리 1회) → "
-            "자주 묻는 질문 3~5개 → 해시태그 순으로 구성하세요. "
+            "독자는 이 상품을 살지 고민하며 비교 정보를 찾아 들어온 사람입니다. "
+            "구조는 도입(공감 유도) → 상품별 분석(장단점을 솔직하게, 스펙을 비교해야 하면 jb-table로 정리) "
+            "→ 결론(핵심 요약) → Q&A(3~5개) 순으로 구성하세요. "
+            "CTA 버튼은 정확히 2번 사용합니다: 첫 번째는 도입부 직후, 두 번째는 결론 다음. 버튼 텍스트에는 "
+            "상품명·카테고리명을 그대로 넣으세요(예: '무선청소기 최저가 확인하기👆'). "
             "장점만 나열하지 말고 단점이나 이런 분께는 안 맞을 수 있다는 점도 최소 1곳 솔직하게 언급하세요. "
             "글 맨 앞에는 반드시 '본 포스팅은 쿠팡 파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 "
-            "제공받습니다.'라는 문구를 그대로 포함하세요. " + QUALITY_RULES + " " + STYLE_GUIDE + " " + IMAGE_PROMPT_RULES
+            "제공받습니다.'라는 문구를 그대로 포함하세요(공정거래위원회 표시광고 지침 준수). "
+            + QUALITY_RULES + " " + STYLE_GUIDE + " " + AD_SLOT_RULES + " " + IMAGE_PROMPT_RULES
         ),
     },
     "건강정보": {
@@ -829,7 +831,10 @@ CTA 안내: {cta_note}
     thumbnail_prompt = thumbnail_prompt.strip()
 
     if mode == "쿠팡파트너스" and DISCLOSURE_TEXT not in content:
-        content = DISCLOSURE_TEXT + "\n\n" + content
+        if fmt == "html":
+            content = f'<p style="font-size:13px;color:#8B8371;">{DISCLOSURE_TEXT}</p>' + content
+        else:
+            content = DISCLOSURE_TEXT + "\n\n" + content
     if mode == "건강정보" and has_real_link and DISCLOSURE_TEXT not in content:
         if fmt == "html":
             content = f'<p style="font-size:13px;color:#8B8371;">{DISCLOSURE_TEXT}</p>' + content
@@ -957,6 +962,9 @@ def run_seo_check(mode, cfg, topic, title, meta, tags, content, images, fmt=None
             if cta_count > 0:
                 checks.append(("쿠팡 파트너스 고지 문구", "ok" if DISCLOSURE_TEXT in content else "bad",
                                 "포함" if DISCLOSURE_TEXT in content else "누락 — 자동 보정됨"))
+        if mode == "쿠팡파트너스":
+            checks.append(("파트너스 고지 문구", "ok" if DISCLOSURE_TEXT in content else "bad",
+                            "포함" if DISCLOSURE_TEXT in content else "누락 — 자동 보정됨"))
         ad_code = st.session_state.get("adsense_code", "").strip()
         if ad_code:
             ad_count = content.count("jb-ad-slot")
@@ -988,8 +996,8 @@ def run_seo_check(mode, cfg, topic, title, meta, tags, content, images, fmt=None
 # UI
 # ────────────────────────────────────────────────────────────────
 st.title("📝 포스트팩토리 — SEO 블로그 자동작성")
-st.caption("지원금 · 축제 · 일반 · 건강정보는 출력 형식(티스토리 HTML / 네이버 텍스트)을 선택할 수 있고, "
-           "쿠팡파트너스는 항상 네이버 텍스트로 생성합니다")
+st.caption("모든 카테고리(지원금 · 축제 · 축제 모음 · 일반 · 건강정보 · 쿠팡파트너스)가 "
+           "티스토리(HTML)로 생성됩니다")
 
 client = get_client()
 if client is None:
@@ -1142,15 +1150,7 @@ with col_input:
         if mode == "쿠팡파트너스":
             st.caption("⚠️ 쿠팡 파트너스 이용약관상 링크는 실제 발급받은 파트너스 링크만 사용해야 합니다.")
 
-    if mode == "쿠팡파트너스":
-        output_format = "text"  # 쿠팡파트너스는 항상 네이버 텍스트 형식 고정
-    else:
-        fmt_label = st.radio(
-            "출력 형식", ["티스토리 (HTML)", "네이버 블로그 (텍스트)"], horizontal=True,
-            help="'네이버 블로그(텍스트)'를 고르면 이 카테고리의 리서치·사실관계 규칙은 그대로 유지하면서 "
-                 "HTML 태그 없는 순수 텍스트로, 이미지/링크 자리 표시도 네이버 에디터에 맞게 바뀝니다.",
-        )
-        output_format = "html" if fmt_label.startswith("티스토리") else "text"
+    output_format = cfg["format"]  # 티스토리 전용 운영으로 확정 — 네이버 텍스트 선택 옵션 제거, 카테고리 기본 형식 그대로 사용
 
     c1, c2 = st.columns(2)
     with c1:
