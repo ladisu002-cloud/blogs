@@ -494,14 +494,41 @@ def free_research(topic, naver_id, naver_secret):
     return text, sources, None
 
 
-def search_official_link(query, naver_id, naver_secret):
-    """무료 검색(네이버 웹문서)으로 공식 홈페이지로 추정되는 링크 하나를 찾는다. (link, error) 반환.
-    그라운딩처럼 '이게 진짜 공식 사이트다'를 판별해주는 게 아니라 검색 상위 결과를 그대로 쓰는 것이라,
-    가끔 공식 사이트가 아닌 블로그·뉴스 링크가 나올 수 있다 — 생성 후 꼭 직접 확인을 권장한다."""
-    text, sources, err = free_research(f"{query} 공식 홈페이지", naver_id, naver_secret)
-    if sources:
-        return sources[0]["link"], None
-    return None, err or "검색 결과 없음"
+def search_official_link(query, naver_id, naver_secret, mode=None):
+    """네이버 '웹문서' 검색(지식백과 제외)으로 공식 홈페이지로 추정되는 링크 하나를 찾는다. (link, error) 반환.
+    지식백과(encyc)는 정의를 설명하는 문서일 뿐 특정 지역·행사의 '공식 홈페이지'가 아닌 경우가 대부분이라
+    (예: '태안 가볼만한곳' 검색에 '뉴욕 가볼만한곳' 같은 무관한 백과 항목이 잡히는 사고가 실제로 있었음)
+    애초에 검색 대상에서 뺀다. 카테고리별로 진짜 공식 정보가 모이는 도메인이 있으면 그걸 우선한다
+    (지원금/제도→복지로·정부24 등 *.go.kr, 축제/행사→대한민국구석구석·지자체 *.go.kr).
+    그래도 이건 그라운딩처럼 '이게 진짜 공식 사이트다'를 판별해주는 게 아니라 검색 결과 중 하나를 고르는
+    것이라, 생성 후 꼭 직접 확인을 권장한다."""
+    if not (naver_id.strip() and naver_secret.strip()):
+        return None, "네이버 검색 키가 필요합니다."
+
+    preferred_domains = {
+        "지원금/제도": ("bokjiro.go.kr", "gov.kr", ".go.kr"),
+        "축제/행사": ("visitkorea.or.kr", ".go.kr"),
+        "축제 모음(월별·계절)": ("visitkorea.or.kr", ".go.kr"),
+    }.get(mode, ())
+    # 개인 블로그/카페는 '공식 홈페이지' 자동 채움 결과로는 부적절해서 최후순위로 미룬다.
+    low_priority_domains = ("blog.naver.com", "cafe.naver.com", "tistory.com", "brunch.co.kr")
+
+    try:
+        results = naver_search(f"{query} 공식 홈페이지", naver_id, naver_secret, api="webkr", display=10)
+    except Exception as e:
+        return None, str(e)
+    if not results:
+        return None, "검색 결과 없음"
+
+    for d in preferred_domains:
+        for r in results:
+            if d in r.get("link", ""):
+                return r["link"], None
+
+    normal_results = [r for r in results if not any(d in r.get("link", "") for d in low_priority_domains)]
+    if normal_results:
+        return normal_results[0]["link"], None
+    return results[0]["link"], None
 
 
 def research_topic(topic, naver_id, naver_secret):
@@ -1179,14 +1206,14 @@ with col_output:
             auto_used = []
             if mode != "쿠팡파트너스":  # 쿠팡파트너스만 실제 발급받은 제휴 링크가 필수라 자동 검색 대상에서 제외
                 if not resolved_link1:
-                    found, err = search_official_link(topic.strip(), naver_id, naver_secret)
+                    found, err = search_official_link(topic.strip(), naver_id, naver_secret, mode)
                     if found:
                         resolved_link1 = found
                         auto_used.append(("링크1", found))
                     else:
                         resolved_link1 = "[링크 입력]"
                 if cfg["link_mode"] == "dual" and not resolved_link2:
-                    found, err = search_official_link(topic.strip(), naver_id, naver_secret)
+                    found, err = search_official_link(topic.strip(), naver_id, naver_secret, mode)
                     if found:
                         resolved_link2 = found
                         auto_used.append(("링크2", found))
@@ -1365,10 +1392,10 @@ with st.expander("📅 여러 주제 한 번에 생성 (배치 — 30일치/1주
                     b_link2 = link2_in.strip() if cfg["link_mode"] == "dual" else b_link1
                     if mode != "쿠팡파트너스":
                         if not b_link1:
-                            found, _ = search_official_link(t, naver_id, naver_secret)
+                            found, _ = search_official_link(t, naver_id, naver_secret, mode)
                             b_link1 = found or "[링크 입력]"
                         if cfg["link_mode"] == "dual" and not b_link2:
-                            found, _ = search_official_link(t, naver_id, naver_secret)
+                            found, _ = search_official_link(t, naver_id, naver_secret, mode)
                             b_link2 = found or "[링크 입력]"
                     b_link1 = b_link1 or "[링크 입력]"
                     b_link2 = b_link2 or b_link1
