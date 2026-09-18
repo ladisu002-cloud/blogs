@@ -540,28 +540,60 @@ def research_topic(topic, naver_id, naver_secret):
 
 
 def plan_health_product_post(client, product_name, naver_id, naver_secret):
-    """홈쇼핑/TV에 나온 건강기능식품 제품명을 받아서, 제품명이 아니라 시청자가 실제 검색할
-    성분/효과 키워드 중심의 SEO 제목 후보 2~3개와 핵심 기획 포인트를 제안한다.
-    무료 검색(네이버/위키백과)으로 자료를 먼저 모은 뒤, 그 내용을 근거로 Gemini가 (그라운딩 없이,
-    순수 텍스트 생성 — 결제수단 없이도 완전 무료) 정리해서 답한다.
+    """홈쇼핑/TV에 나온 제품명을 받아서, 이 제품 자체(가격·용량·후기·랭킹 같은 쇼핑성 정보)가 아니라
+    이 제품의 성분·효능이 어떤 '건강 주제'와 연결되는지 찾아서, 그 건강 주제를 소재로 한 SEO 제목
+    후보와 기획 포인트를 제안한다. 건강 방송 직후 이어지는 홈쇼핑에서 관련 제품이 방송되고, 그걸 본
+    시청자가 검색→구매로 이어지는 흐름을 가정한다 — 즉 최종 글은 '제품 리뷰'가 아니라 '건강 정보
+    글 + 자연스러운 제품 연결(쿠팡파트너스)'이 목적이다.
+    제품명을 그대로 검색하면 거의 100% 쇼핑 콘텐츠만 나오는 문제가 있어서(커머스 SEO가 정확히
+    그걸 노리는 자료라), 2단계로 검색한다: 1) '제품명+성분/효능'으로 이 제품이 내세우는 효능을 먼저
+    파악 → 2) 그 효능을 나타내는 건강 주제 키워드를 뽑아 '건강'과 묶어 다시 검색해서 쇼핑성이 섞이지
+    않은 배경 자료를 모은다.
     반환: (제목 후보 리스트, 포인트 텍스트, 출처 리스트, 에러)"""
-    research_text, sources, research_err = free_research(product_name, naver_id, naver_secret)
-    if not research_text:
-        return [], "", [], research_err or "관련 자료를 찾지 못했어요."
-    research_text = _sanitize_for_prompt(research_text)
+    step1_text, step1_sources, err1 = free_research(f"{product_name} 성분 효능", naver_id, naver_secret)
+    if not step1_text:
+        return [], "", [], err1 or "관련 자료를 찾지 못했어요."
+    step1_text = _sanitize_for_prompt(step1_text, max_len=1500)
 
+    health_topic_kw = ""
+    try:
+        extract_prompt = (
+            f"'{product_name}'이라는 제품에 대한 아래 검색 자료를 보고, 이 제품이 내세우는 핵심 효능을 "
+            "나타내는 '건강 주제 키워드'를 딱 하나만 아주 짧게 뽑아줘(예: 장 건강, 혈행 개선, 피부 탄력, "
+            "관절 건강). 가격·용량·후기 같은 쇼핑 정보는 무시해. 다른 설명 없이 키워드만 답해.\n\n"
+            + step1_text
+        )
+        ex_resp = _generate_with_retry(client, contents=extract_prompt, config=types.GenerateContentConfig(
+            max_output_tokens=64, temperature=0.1,
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
+        ))
+        health_topic_kw = (ex_resp.text or "").strip().splitlines()[0].strip().strip("*")[:30]
+    except Exception:
+        pass  # 실패해도 1단계 자료만으로 계속 진행
+
+    step2_text, step2_sources = "", []
+    if health_topic_kw:
+        step2_text, step2_sources, _ = free_research(f"{health_topic_kw} 건강", naver_id, naver_secret)
+
+    sources = step1_sources + step2_sources
+    combined_research = step1_text + ("\n\n[건강 주제 배경자료]\n" + _sanitize_for_prompt(step2_text, max_len=1500)
+                                       if step2_text else "")
+
+    topic_line = f"이 글의 진짜 주제는 '{health_topic_kw}'이고" if health_topic_kw else "이 글의 진짜 주제는 이 제품이 다루는 건강 주제이고"
     prompt = (
-        f"'{product_name}'이라는 건강기능식품(또는 관련 성분)이 최근 홈쇼핑/TV 방송에 나왔어. "
-        "아래는 이 제품/성분에 대해 무료 검색으로 확인한 자료야. 이 내용에 근거해서, "
-        "이 제품을 직접 홍보하는 글이 아니라 방송을 보고 시청자가 실제로 검색할 만한 "
-        "성분·효과·증상 키워드를 중심으로 정리해줘. 자료에 없는 내용은 지어내지 말고, "
-        "다음 형식으로만 답해줘 (다른 설명 금지, 각 줄은 절대 중간에 끊기지 않게 끝까지 완성할 것):\n"
-        "제목1: (32자 이내 SEO 블로그 제목 — 제품명/브랜드명 대신 성분명·효과·증상 키워드 중심)\n"
-        "제목2: (제목1과는 다른 각도/키워드의 32자 이내 SEO 제목)\n"
-        "제목3: (제목1,2와도 다른 각도의 32자 이내 SEO 제목)\n"
-        "포인트: (핵심 기획 포인트 2~3문장 — 다룰 원리/효과, 그리고 확인 가능하면 식약처 인증 여부, "
-        "일반적 권장 섭취량, 주의해야 할 체질/상황 등 신뢰도를 높일 검증 정보 포함)\n\n"
-        f"[검색된 자료]\n{research_text}"
+        f"'{product_name}'이라는 제품이 최근 홈쇼핑/TV 방송에 나왔어. 건강 관련 방송 직후 이어지는 "
+        "홈쇼핑에서 관련 제품이 방송되는 경우가 많고, 그 방송을 본 시청자가 검색해서 구매까지 이어지는 "
+        f"흐름을 노리는 글을 기획하고 있어. {topic_line}, 제품은 글 안에서 자연스러운 구매 링크로만 "
+        "연결돼(글 자체가 제품 리뷰가 아니야). 그러니 가격·용량·구성·후기·랭킹 같은 쇼핑성 정보 중심 "
+        "제목은 만들지 마. 아래 자료에 없는 효과·수치는 지어내지 마. "
+        "다음 형식으로만 답해줘 (다른 설명 금지, 각 줄은 중간에 끊기지 않게 끝까지 완성할 것):\n"
+        "제목1: (32자 이내 — 건강 주제/증상 중심 SEO 제목. 제품명·가격·후기·랭킹 단어 금지)\n"
+        "제목2: (제목1과는 다른 각도의 건강 주제 중심 32자 이내 제목, 제품명·가격·후기·랭킹 단어 금지)\n"
+        "제목3: (제목1,2와도 다른 각도의 건강 주제 중심 32자 이내 제목, 제품명·가격·후기·랭킹 단어 금지)\n"
+        "포인트: (이 건강 주제가 무엇인지, 이 제품의 성분·효능이 어떻게 연결되는지, 확인 가능하면 "
+        "식약처 인증 여부·일반적 권장 섭취량·주의 체질 등 신뢰도를 높일 정보, 글 어느 지점에서 제품을 "
+        "자연스럽게 연결하면 좋을지 2~3문장)\n\n"
+        f"[검색된 자료]\n{combined_research}"
     )
     try:
         resp = _generate_with_retry(client, contents=prompt, config=types.GenerateContentConfig(
