@@ -585,6 +585,20 @@ def plan_health_product_post(client, product_name, naver_id, naver_secret):
         else:
             return [], "", sources, err_str
 
+    titles = []
+    for i in (1, 2, 3):
+        m = re.search(rf"제목\s*{i}\s*[:：]\s*(.+)", raw)
+        if m:
+            t = m.group(1).strip().strip("*").strip()
+            if t:
+                titles.append(t)
+    if not titles:
+        # 혹시 모델이 "제목:" 한 줄 형식으로만 답했을 때를 위한 하위 호환
+        m = re.search(r"제목\s*[:：]\s*(.+)", raw)
+        if m:
+            titles = [m.group(1).strip().strip("*").strip()]
+    point_m = re.search(r"포인트\s*[:：]\s*(.+)", raw, flags=re.DOTALL)
+    point_text = point_m.group(1).strip() if point_m else (raw if not titles else "")
     return titles, point_text, sources, None
 
 
