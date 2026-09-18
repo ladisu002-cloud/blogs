@@ -602,6 +602,101 @@ def plan_health_product_post(client, product_name, naver_id, naver_secret):
     return titles, point_text, sources, None
 
 
+def search_health_broadcast_news(keyword, naver_id, naver_secret):
+    """건강 관련 방송(공중파/종합편성) 내용을 찾는다.
+    처음엔 뉴스(news) API만 썼는데, 방송사 자체 보도자료가 아닌 이상 'OO 방송에서 이 성분 다룸' 같은
+    상세 내용은 뉴스에 잘 안 잡힌다는 걸 확인했다. 실제로는 시청자가 방송 내용을 정리해서 올리는
+    블로그·카페 후기글("오늘 OO 방송 정리" 류)이 훨씬 자주, 훨씬 상세하게 걸린다 — 그래서 블로그·카페를
+    우선 검색하고, 뉴스는 보조로 더한다.
+    반환: (합쳐진 텍스트, 출처 리스트[{title, link}], 에러메시지 or None)"""
+    if not (naver_id.strip() and naver_secret.strip()):
+        return "", [], "네이버 검색 키가 필요합니다."
+    query = f"{keyword.strip()} 방송" if keyword.strip() else "건강 방송 화제 성분"
+    results, err = [], None
+    for api, n in (("blog", 6), ("cafearticle", 4), ("news", 4)):
+        try:
+            results += naver_search(query, naver_id, naver_secret, api=api, display=n)
+        except Exception as e:
+            if not results:
+                err = str(e)
+    if not results:
+        return "", [], err or "검색 결과 없음"
+    text = "\n".join(f"- {r['title']}: {r['description']}" for r in results if r.get("description"))
+    sources = [{"title": r["title"], "link": r["link"]} for r in results if r.get("link")]
+    return text, sources, None
+
+
+def plan_health_broadcast_post(client, keyword, naver_id, naver_secret):
+    """건강 관련 공중파·종합편성 방송 보도를 검색해서, 최근 어떤 프로그램이 어떤 주제를 다뤘고 그때
+    언급된 성분·제품이 있다면 무엇인지 찾은 뒤, 그 내용을 근거로 시청자가 실제 검색할 성분/효과
+    키워드 중심 SEO 제목 후보와 기획 포인트를 제안한다. 제품명을 이미 아는 경우를 위한
+    plan_health_product_post와 달리, 이건 제품명을 몰라도 키워드(증상·성분·주제)나 빈 값으로
+    '요즘 화제인 방송 소재'를 먼저 찾아준다. 반환 형태는 plan_health_product_post와 동일해서
+    UI에서 같은 방식(제목 후보 + 기획 포인트)으로 쓸 수 있다.
+    반환: (제목 후보 리스트, 포인트 텍스트(방송명·다룬 주제·언급 제품 포함), 출처 리스트, 에러)"""
+    research_text, sources, research_err = search_health_broadcast_news(keyword, naver_id, naver_secret)
+    if not research_text:
+        return [], "", [], research_err or "관련 방송 보도를 찾지 못했어요."
+    research_text = _sanitize_for_prompt(research_text)
+
+    kw_line = f"키워드: '{keyword.strip()}'" if keyword.strip() else "특정 키워드 없이 최근 화제가 된 건강 방송 전반"
+    prompt = (
+        f"공중파(KBS/MBC/SBS)나 종합편성채널(TV조선/채널A/MBN/JTBC)의 건강 관련 방송을 조사하고 있어. "
+        f"{kw_line}에 대해, 아래는 무료 검색(블로그·카페 후기, 일부 뉴스)으로 확인한 관련 자료야. "
+        "블로그·카페 글은 시청자 개인 후기라 프로그램명·다룬 주제·언급된 성분/제품 같은 '사실 정보'를 "
+        "파악하는 데만 참고하고, 효과에 대한 개인적 주장이나 과장된 후기 표현은 그대로 가져오지 마. "
+        "이 자료에 근거해서 (1) 어떤 프로그램이 (2) 어떤 주제를 다뤘고 (3) 그때 언급된 성분·제품이 "
+        "있다면 무엇인지 파악해줘. 자료에 명확히 나오지 않는 프로그램명·제품명은 지어내지 말고, "
+        "확인 안 되면 그 부분은 그냥 빼줘. 이 방송을 직접 홍보하는 글이 아니라, 시청자들이 실제로 검색할 "
+        "법한 키워드를 중심으로 정리해줘 — 다만 사람들이 검색하는 방식은 한 가지가 아니야. (a) 방송은 "
+        "기억하는데 성분명은 가물가물해서 '프로그램명+이번 편 주제'로 검색하는 사람(예: '슈퍼푸드의 힘 "
+        "장건강'), (b) 성분·효과만 기억해서 프로그램 언급 없이 검색하는 사람, (c) 방송 자체를 모르고 "
+        "증상·고민으로만 검색하는 사람이 섞여있어. 제목 3개를 이 세 각도로 하나씩 다르게 써줘. "
+        "프로그램명을 못 찾았으면 (a) 대신 다른 증상/효과 각도로 대체해. "
+        "다음 형식으로만 답해줘 (다른 설명 금지, 각 줄은 중간에 끊기지 않게 끝까지 완성할 것):\n"
+        "제목1: (32자 이내 — 프로그램명을 찾았으면 '프로그램명+이번 편 주제' 조합. 못 찾았으면 "
+        "성분·효과 키워드 중심)\n"
+        "제목2: (32자 이내 — 프로그램 언급 없이 성분·효과 키워드 중심, 제품명 대신 성분명으로)\n"
+        "제목3: (32자 이내 — 프로그램·성분명 언급 없이 증상·고민 자체를 검색하는 사람 대상)\n"
+        "포인트: (어떤 방송이 어떤 주제를 다뤘는지, 언급된 성분·제품이 있다면 무엇인지, 핵심 기획 "
+        "포인트 2~3문장 — 자료에서 확인된 것만)\n\n"
+        f"[검색된 방송 관련 보도]\n{research_text}"
+    )
+    try:
+        resp = _generate_with_retry(client, contents=prompt, config=types.GenerateContentConfig(
+            max_output_tokens=1536, temperature=0.3,
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
+        ))
+        raw = (resp.text or "").strip()
+    except Exception as e:
+        err_str = str(e)
+        if "INVALID_ARGUMENT" in err_str:
+            try:
+                resp = _generate_with_retry(client, contents=prompt, config=types.GenerateContentConfig(
+                    max_output_tokens=1536, temperature=0.3,
+                ))
+                raw = (resp.text or "").strip()
+            except Exception as e2:
+                return [], "", sources, str(e2)
+        else:
+            return [], "", sources, err_str
+
+    titles = []
+    for i in (1, 2, 3):
+        m = re.search(rf"제목\s*{i}\s*[:：]\s*(.+)", raw)
+        if m:
+            t = m.group(1).strip().strip("*").strip()
+            if t:
+                titles.append(t)
+    if not titles:
+        m = re.search(r"제목\s*[:：]\s*(.+)", raw)
+        if m:
+            titles = [m.group(1).strip().strip("*").strip()]
+    point_m2 = re.search(r"포인트\s*[:：]\s*(.+)", raw, flags=re.DOTALL)
+    point_text2 = point_m2.group(1).strip() if point_m2 else (raw if not titles else "")
+    return titles, point_text2, sources, None
+
+
 def generate_social_hooks(client, title, meta, plain_content, mode, post_url=""):
     """완성된 티스토리 원고를 바탕으로 쓰레드/인스타용 후킹 카피를 만든다.
     그라운딩 없는 순수 텍스트 생성(결제수단 없이도 동작) — plan_health_product_post와 같은 패턴.
@@ -1181,6 +1276,44 @@ with col_input:
                                 st.session_state["auto_generate_from_title"] = True
                                 st.rerun()
                 st.divider()
+
+        with st.expander("📺 요즘 방송 화제인 건강 주제 찾기 (선택)"):
+            st.caption("증상·성분·주제 키워드나 프로그램명을 넣으면(비워두면 전반적으로 검색) 시청자들이 "
+                       "올린 블로그·카페 후기(+ 일부 뉴스)를 검색해서, 어떤 프로그램이 어떤 주제를 다뤘고 "
+                       "언급된 성분·제품이 있다면 무엇인지 찾아 SEO 제목 후보를 제안해드려요. 뉴스보다 "
+                       "블로그·카페 쪽이 방송 내용을 훨씬 상세히 정리해두는 경우가 많아서 이쪽을 우선 "
+                       "검색해요. 관련 글 자체가 없으면 결과가 안 나올 수 있어요(지어내지 않도록 자료 "
+                       "없으면 안 만들게 설계했어요).")
+            broadcast_keyword = st.text_input(
+                "증상/성분/주제 키워드 또는 프로그램명 (선택)",
+                placeholder="예) 혈압, 장 건강, 슈퍼푸드의 힘 — 비워두면 전반 검색",
+                key="broadcast_keyword",
+            )
+            if st.button("🔎 방송 주제 검색", disabled=client is None, key="broadcast_plan_button"):
+                with st.spinner("건강 방송 관련 보도 검색 중…"):
+                    b_titles, b_point, _b_sources, b_err = plan_health_broadcast_post(
+                        client, broadcast_keyword, naver_id, naver_secret,
+                    )
+                    st.session_state["health_broadcast_plan"] = {
+                        "titles": b_titles, "point": b_point, "error": b_err,
+                    }
+            bp = st.session_state.get("health_broadcast_plan")
+            if bp:
+                if bp.get("error") and not bp.get("titles"):
+                    st.warning(f"실패: {bp['error']}")
+                else:
+                    if bp.get("point"):
+                        st.caption(bp["point"])
+                    for ti, t in enumerate(bp.get("titles", [])):
+                        bc1, bc2 = st.columns([5, 1.6])
+                        with bc1:
+                            st.markdown(f"· {t}")
+                        with bc2:
+                            if st.button("이 제목으로 글쓰기", key=f"use_broadcast_title_{ti}", use_container_width=True):
+                                st.session_state["_pending_topic"] = t
+                                st.session_state["fixed_title"] = t
+                                st.session_state["auto_generate_from_title"] = True
+                                st.rerun()
 
     if cfg["link_mode"] == "dual":
         link1_in = st.text_input(cfg["link1_label"], placeholder="https://... (비우면 자동 검색)")
