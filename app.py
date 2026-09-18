@@ -1258,13 +1258,16 @@ with col_input:
 
     # st.pills는 기본적으로 한 줄(nowrap)로 렌더링돼서 창을 좁히면 넘치는 항목이 잘려 보여요.
     # 좁을 때는 2줄 이상으로 줄바꿈되도록 강제합니다.
+    # (개발자도구로 확인한 실제 구조: 각 알약 버튼이 role="radio"이고, 이걸 감싸는 부모가
+    # role="radiogroup"이에요. 스트림릿 버전마다 바뀌는 emotion-cache 클래스명 대신 이 안정적인
+    # ARIA 속성을 선택자로 씁니다.)
     st.markdown(
         """
         <style>
         div[data-testid="stPills"] {
             overflow-x: visible !important;
         }
-        div[data-testid="stPills"] > div {
+        div[data-testid="stPills"] div[role="radiogroup"] {
             flex-wrap: wrap !important;
             overflow-x: visible !important;
             row-gap: 0.4rem;
