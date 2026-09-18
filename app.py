@@ -1256,6 +1256,23 @@ with col_input:
     if st.session_state.get("_pending_topic") is not None:
         st.session_state["topic_input"] = st.session_state.pop("_pending_topic")
 
+    # st.pills는 기본적으로 한 줄(nowrap)로 렌더링돼서 창을 좁히면 넘치는 항목이 잘려 보여요.
+    # 좁을 때는 2줄 이상으로 줄바꿈되도록 강제합니다.
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stPills"] {
+            overflow-x: visible !important;
+        }
+        div[data-testid="stPills"] > div {
+            flex-wrap: wrap !important;
+            overflow-x: visible !important;
+            row-gap: 0.4rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
     mode = st.pills("카테고리", list(MODE_CONFIG.keys()), default=list(MODE_CONFIG.keys())[0])
     if not mode:
         mode = list(MODE_CONFIG.keys())[0]
