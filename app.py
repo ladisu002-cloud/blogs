@@ -1256,27 +1256,10 @@ with col_input:
     if st.session_state.get("_pending_topic") is not None:
         st.session_state["topic_input"] = st.session_state.pop("_pending_topic")
 
-    # st.pills는 기본적으로 한 줄(nowrap)로 렌더링돼서 창을 좁히면 넘치는 항목이 잘려 보여요.
-    # 좁을 때는 2줄 이상으로 줄바꿈되도록 강제합니다.
-    # (개발자도구로 확인한 실제 구조: 각 알약 버튼이 role="radio"이고, 이걸 감싸는 부모가
-    # role="radiogroup"이에요. 스트림릿 버전마다 바뀌는 emotion-cache 클래스명 대신 이 안정적인
-    # ARIA 속성을 선택자로 씁니다.)
-    st.markdown(
-        """
-        <style>
-        div[data-testid="stPills"] {
-            overflow-x: visible !important;
-        }
-        div[data-testid="stPills"] div[role="radiogroup"] {
-            flex-wrap: wrap !important;
-            overflow-x: visible !important;
-            row-gap: 0.4rem;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-    mode = st.pills("카테고리", list(MODE_CONFIG.keys()), default=list(MODE_CONFIG.keys())[0])
+    # st.pills 자체가 CSS로 줄바꿈/스크롤을 아무리 걸어도 창을 좁히면 잘려 보이는 문제가 계속 반복돼서,
+    # 위젯을 selectbox(드롭다운)로 바꿉니다 — 드롭다운은 창 너비와 무관하게 항상 한 줄에 들어가서
+    # 이 문제 자체가 원천적으로 생기지 않습니다.
+    mode = st.selectbox("카테고리", list(MODE_CONFIG.keys()))
     if not mode:
         mode = list(MODE_CONFIG.keys())[0]
     cfg = MODE_CONFIG[mode]
