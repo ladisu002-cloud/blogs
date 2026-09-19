@@ -280,6 +280,13 @@ SKIN_CLASSES_DOC = """
 - 본문 분량 목표에 맞춰 충분히 작성하고, 마지막에 반드시 ###END### 까지 도달할 것 (중간에 끊지 말 것)
 - 모든 태그를 빠짐없이 닫을 것
 - 코드펜스나 설명 문구 없이, 지정된 마커 형식으로만 응답할 것
+- CTA 버튼(jb-cta)은 '왜 눌러야 하는지'를 설명하는 문장 바로 다음 줄에 붙여서 배치하세요. 그 이유 설명과
+  버튼 사이에 다른 문단·이미지가 끼어들지 않게 하고, 안내 문구 없이 버튼만 뚝 떨어져 있지 않게 하세요.
+- jb-table(표)이나 jb-spot-list(카드 목록) 바로 앞에는 이게 뭘 보여주는 표/목록인지 안내하는 짧은
+  문장을 두고, 바로 뒤에 곧장 다른 컴포넌트(특히 버튼)를 붙이지 마세요 — 표/카드와 다음 요소 사이가
+  다닥다닥 붙어 보이면 안 됩니다.
+- jb-highlight(본문 강조)는 섹션당 최대 1~2곳까지만, 정말 핵심적인 숫자나 키워드에만 쓰세요. 강조를
+  남발하면 오히려 아무것도 도드라져 보이지 않습니다.
 """
 
 TEXT_RULES_DOC = """
@@ -764,6 +771,52 @@ def plan_health_broadcast_post(client, keyword, naver_id, naver_secret):
     point_m2 = re.search(r"포인트\s*[:：]\s*(.+)", raw, flags=re.DOTALL)
     point_text2 = point_m2.group(1).strip() if point_m2 else (raw if not titles else "")
     return titles, point_text2, sources, None
+
+
+def suggest_subtopics(client, mode, topic, title):
+    """방금 쓴 글의 대표 키워드를 세부 키워드로 쪼개서 제안한다.
+    아백 제자 인터뷰 영상 여러 편에서 반복적으로 나온 핵심 전략 — 대표 키워드 하나로 뭉뚱그린 글
+    한 편만 쓰지 말고, 신청방법·자격조건·지급액·신청기간·지역별처럼 사람들이 실제로 다르게 검색하는
+    세부 키워드마다 별도 글을 쓰면 검색 유입이 늘어난다는 원리. 실제 글을 쓰지 않고 세부 키워드
+    후보만 가볍게 제안한다(그라운딩 없는 순수 텍스트 생성 — plan_health_product_post와 같은 패턴,
+    결제수단 없이도 동작).
+    반환: (세부 키워드 리스트, 에러)"""
+    prompt = (
+        f"'{topic}'(이미 '{title}'라는 제목으로 글을 하나 썼음, 카테고리: {mode})에 대해, "
+        "대표 키워드 하나로 뭉뚱그리지 않고 사람들이 실제로 다르게 검색할 법한 세부 키워드를 "
+        "4~5개 제안해줘. 예를 들어 '신청 방법', '자격 조건', '지급액/혜택', '신청 기간', "
+        "'지역별 차이'처럼 이미 쓴 글과는 다른 각도로 검색될 만한 키워드여야 해. 이미 쓴 글 제목과 "
+        "거의 같은 키워드는 제안하지 마. 카테고리 성격에 안 맞는 억지 키워드도 만들지 마. "
+        "다른 설명 없이 아래 형식으로만 답해:\n"
+        "키워드1: (텍스트)\n키워드2: (텍스트)\n키워드3: (텍스트)\n키워드4: (텍스트)\n키워드5: (텍스트)"
+    )
+    try:
+        resp = _generate_with_retry(client, contents=prompt, config=types.GenerateContentConfig(
+            max_output_tokens=512, temperature=0.6,
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
+        ))
+        raw = (resp.text or "").strip()
+    except Exception as e:
+        err_str = str(e)
+        if "INVALID_ARGUMENT" in err_str:
+            try:
+                resp = _generate_with_retry(client, contents=prompt, config=types.GenerateContentConfig(
+                    max_output_tokens=512, temperature=0.6,
+                ))
+                raw = (resp.text or "").strip()
+            except Exception as e2:
+                return [], str(e2)
+        else:
+            return [], err_str
+
+    subtopics = []
+    for i in range(1, 8):
+        m = re.search(rf"키워드\s*{i}\s*[:：]\s*(.+)", raw)
+        if m:
+            t = m.group(1).strip().strip("*").strip()
+            if t:
+                subtopics.append(t)
+    return subtopics, None
 
 
 def generate_social_hooks(client, title, meta, plain_content, mode, post_url=""):
@@ -1485,6 +1538,7 @@ with col_output:
                     st.session_state["result"] = {
                         "title": title, "meta": meta, "tags": tags,
                         "content": content, "format": output_format, "mode": mode,
+                        "topic": topic.strip(),
                         "checks": checks, "auto_used": auto_used, "images": images,
                         "thumbnail_prompt": thumbnail_prompt,
                         "html_repaired": html_repaired, "research_sources": research_sources,
@@ -1549,6 +1603,31 @@ with col_output:
                 if alt:
                     st.markdown(f"**{label} 대체텍스트:** {alt}")
                 st.code(f"[{label}] {prompt}", language=None)
+
+        st.divider()
+        st.subheader("🕸️ 세부 키워드로 연작 만들기")
+        st.caption("방금 쓴 글의 대표 키워드를 신청방법·자격조건·지급액처럼 사람들이 실제로 다르게 "
+                   "검색하는 세부 키워드로 쪼개서 제안해드려요. 대표 키워드 하나로 뭉뚱그린 글 한 편보다, "
+                   "세부 키워드마다 별도 글을 쓰는 쪽이 검색 유입이 늘어나요.")
+        if st.button("🔎 세부 키워드 제안받기", disabled=client is None, key="suggest_subtopics_btn"):
+            with st.spinner("세부 키워드 뽑는 중…"):
+                subtopics, sub_err = suggest_subtopics(
+                    client, result["mode"], result.get("topic", ""), result["title"],
+                )
+                st.session_state["subtopic_suggestions"] = {"items": subtopics, "error": sub_err}
+        sub_sugg = st.session_state.get("subtopic_suggestions")
+        if sub_sugg:
+            if sub_sugg.get("error") and not sub_sugg.get("items"):
+                st.warning(f"실패: {sub_sugg['error']}")
+            else:
+                for si, kw in enumerate(sub_sugg.get("items", [])):
+                    sc1, sc2 = st.columns([5, 1.6])
+                    with sc1:
+                        st.markdown(f"· {kw}")
+                    with sc2:
+                        if st.button("이 키워드로 새 글쓰기", key=f"use_subtopic_{si}", use_container_width=True):
+                            st.session_state["_pending_topic"] = kw
+                            st.rerun()
 
         st.divider()
         st.subheader("🧵 쓰레드 · 인스타 후킹 카피")
