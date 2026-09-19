@@ -116,10 +116,24 @@ MODE_CONFIG = {
         "link1_label": "공식 홈페이지 링크 (비우면 자동 검색)",
         "system": (
             "당신은 20년차 SEO 전문가이자 지역 축제 여행 콘텐츠 작가입니다. "
-            "독자는 이 축제에 가볼지 결정하려는 사람입니다. "
-            "'핵심 명소'와 '주요 프로그램'은 절대 긴 문단으로 나열하지 말고, "
-            "반드시 jb-spot-list 카드 목록(아이콘 + 짧은 이름 + 1~2문장 설명)으로 3~4개씩 작성하세요. "
-            "그 다음 기본 정보(기간/장소/교통/주차) → 방문 꿀팁 → 함께 즐기면 좋은 다른 행사 순으로 구성하세요. "
+            "독자는 이 축제 이름을 검색해서 들어온 사람이고, 갈지 말지 결정하려고 날짜·장소·시간· "
+            "프로그램·주차·셔틀·먹거리 같은 구체적 정보를 순서대로 확인하고 싶어합니다. 아래 순서와 "
+            "내용을 반드시 지켜서 작성하세요(리서치 자료에 '공식 홈페이지 본문 발췌'가 있으면 그걸 "
+            "최우선 근거로 삼아 최대한 구체적으로 채우고, 뻔하고 짧게 대충 쓰지 마세요):\n"
+            "1) 도입(왜 화제인지, 공감 유도) "
+            "2) 기본 정보를 jb-table로 한눈에(기간/장소/시간/입장료·비용 — 자료에 있는 항목만) "
+            "3) 프로그램 — 절대 3개짜리 뭉뚱그린 목록으로 끝내지 말고, 자료에서 확인되는 프로그램을 "
+            "최대한 모아 아래 세 그룹으로 나눠 각각 jb-spot-list 카드로 작성(그룹별 최소 2~3개, "
+            "자료에 있는 만큼): (a) 아이와 함께 즐길 거리(체험·놀거리) (b) 직접 참여하는 체험 프로그램 "
+            "(c) 어른들이 좋아할 거리(공연·야경·포토스팟 등) — 그룹 소제목을 각각 따로 달아서 구분하세요 "
+            "4) 먹거리 — 지역 특산 먹거리·푸드트럭 등이 자료에 있으면 jb-spot-list 카드로 "
+            "5) 핵심 명소·포토스팟(jb-spot-list, 3~4개) "
+            "6) 주차 및 찾아오는 길 — 자가용 주차 정보, 셔틀버스 운행 여부, 대중교통 방법을 자료에 "
+            "있는 대로 구체적으로(주차장 위치·요금·혼잡 시 대체 주차장, 셔틀 출발지·배차 간격 등) "
+            "7) 방문 꿀팁(jb-tip) — 혼잡 시간대 피하는 법, 우천 시 대응, 챙기면 좋은 준비물 등 "
+            "8) Q&A. "
+            "자료에 없는 정보는 지어내지 말고 그 항목만 빼거나 '자세한 사항은 공식 홈페이지에서 "
+            "확인하세요'로 짧게 처리하되, 있는데도 빼먹지 않도록 자료를 꼼꼼히 반영하세요. "
             "CTA 버튼은 정확히 2번, 같은 링크로 '공식 홈페이지 바로가기👆' 텍스트를 사용하세요. "
             + QUALITY_RULES + " " + STYLE_GUIDE + " " + AD_SLOT_RULES + " " + IMAGE_PROMPT_RULES
         ),
@@ -529,6 +543,29 @@ def search_official_link(query, naver_id, naver_secret, mode=None):
     if normal_results:
         return normal_results[0]["link"], None
     return results[0]["link"], None
+
+
+def fetch_official_page_text(url, max_len=4000):
+    """사용자가 입력(또는 자동 검색으로 찾은) 공식 홈페이지 URL의 실제 본문 텍스트를 가져온다.
+    (텍스트, 에러) 반환. 많은 관공서·축제 공식 사이트가 자바스크립트로 내용을 그리는 SPA라서,
+    requests로는 화면에 보이는 것보다 훨씬 적은(또는 빈) 본문만 받아지는 경우가 있다 — 그런 경우
+    호출부에서 일반 웹 검색 리서치로 보완한다."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        return "", str(e)
+    soup = BeautifulSoup(resp.text, "html.parser")
+    for tag in soup(["script", "style", "nav", "footer", "header", "noscript"]):
+        tag.decompose()
+    text = soup.get_text(separator="\n")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n\s*\n+", "\n", text).strip()
+    return _sanitize_for_prompt(text, max_len=max_len), None
 
 
 def research_topic(topic, naver_id, naver_secret):
@@ -1115,7 +1152,10 @@ def run_seo_check(mode, cfg, topic, title, meta, tags, content, images, fmt=None
         checks.append(("Q&A 포함", "ok" if "jb-qa" in content else "warn", "포함" if "jb-qa" in content else "미포함"))
         if mode == "축제/행사":
             spot_count = content.count("jb-spot-item")
-            checks.append(("명소/프로그램 카드", "ok" if spot_count >= 3 else "warn", f"jb-spot-item {spot_count}개"))
+            checks.append(("명소/프로그램 카드", "ok" if spot_count >= 7 else "warn",
+                            f"jb-spot-item {spot_count}개 (프로그램 3그룹+먹거리+명소 감안 목표 7개 이상)"))
+            checks.append(("기본 정보 표", "ok" if "jb-table" in content else "warn",
+                            "포함" if "jb-table" in content else "미포함"))
         if mode == "축제 모음(월별·계절)":
             spot_count = content.count("jb-spot-item")
             checks.append(("축제 카드 개수", "ok" if spot_count >= 5 else "warn", f"jb-spot-item {spot_count}개 (목표 5~8개)"))
@@ -1405,14 +1445,31 @@ with col_output:
             resolved_link2 = resolved_link2 or resolved_link1
 
             research_block, research_sources = "", []
+            official_page_text = ""
+            # 쿠팡파트너스의 링크는 구매/제휴 링크라 본문을 읽어와도 의미가 없어서 대상에서 제외.
+            # 그 외 카테고리는 link1이 대개 '공식 정보 페이지'라서, 실제 본문을 읽어와 리서치 자료의
+            # 1순위 근거로 삼는다 — 지금까지는 이 페이지를 CTA 버튼 목적지로만 쓰고 내용은 전혀
+            # 읽지 않아서, 정작 공식 홈페이지에 있는 상세 정보(프로그램·주차·꿀팁 등)가 글에 전혀
+            # 반영되지 못하는 문제가 있었다.
+            if use_research and mode != "쿠팡파트너스" and resolved_link1 and resolved_link1 != "[링크 입력]":
+                with st.spinner("공식 홈페이지 본문을 읽는 중…"):
+                    official_page_text, page_err = fetch_official_page_text(resolved_link1)
+                    if official_page_text and len(official_page_text) < 200:
+                        # 자바스크립트 렌더링 사이트라 뼈대만 받아졌을 가능성이 높음 — 너무 짧으면 버린다.
+                        official_page_text = ""
             if use_research:
                 with st.spinner("주제를 웹에서 리서치하는 중…"):
                     text, sources, err = research_topic(topic.strip(), naver_id, naver_secret)
                     if text:
                         research_block = format_research_block(text, sources)
                         research_sources = sources
-                    else:
+                    elif not official_page_text:
                         st.warning(f"리서치 검색에 실패해서 리서치 없이 진행합니다: {err}")
+            if official_page_text:
+                research_block = (
+                    "[공식 홈페이지 본문 발췌 — 가장 신뢰도 높은 1차 자료, 아래 다른 자료보다 우선]\n"
+                    + official_page_text + "\n\n" + research_block
+                )
 
             with st.spinner("SEO 구조에 맞춰 글을 작성하는 중…"):
                 try:
@@ -1584,11 +1641,21 @@ with st.expander("📅 여러 주제 한 번에 생성 (배치 — 30일치/1주
 
                     b_research_block = ""
                     b_sources = []
+                    b_official_text = ""
+                    if use_research and mode != "쿠팡파트너스" and b_link1 and b_link1 != "[링크 입력]":
+                        b_official_text, _ = fetch_official_page_text(b_link1)
+                        if b_official_text and len(b_official_text) < 200:
+                            b_official_text = ""
                     if use_research:
                         text, sources, _ = research_topic(t, naver_id, naver_secret)
                         if text:
                             b_research_block = format_research_block(text, sources)
                             b_sources = sources
+                    if b_official_text:
+                        b_research_block = (
+                            "[공식 홈페이지 본문 발췌 — 가장 신뢰도 높은 1차 자료, 아래 다른 자료보다 우선]\n"
+                            + b_official_text + "\n\n" + b_research_block
+                        )
 
                     title, meta, tags, content, images, thumbnail_prompt, html_repaired = generate_post(
                         client, mode, t, b_link1, b_link2, tone_key, length_key, extra.strip(),
