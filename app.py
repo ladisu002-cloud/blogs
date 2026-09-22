@@ -10,14 +10,6 @@ from google import genai
 from google.genai import types
 from bs4 import BeautifulSoup
 
-try:  # 공식 데이터(정부24·복지로·대한민국 구석구석) 우선 팩트체크 + 공식 이미지 저장 모듈
-    import official_sources as osrc
-except Exception:  # 파일이 없어도 기존 기능은 그대로 동작
-    osrc = None
-
-# 공식 데이터를 먼저 조회·검증하는 카테고리 (지원금=정부24·복지로, 축제=대한민국 구석구석 TourAPI)
-OFFICIAL_MODES = ("지원금/제도", "축제/행사", "축제 모음(월별·계절)")
-
 # ────────────────────────────────────────────────────────────────
 # 설정
 # ────────────────────────────────────────────────────────────────
@@ -1314,30 +1306,6 @@ with st.sidebar:
     )
 
     st.divider()
-    st.subheader("🏛️ 공식 데이터 팩트체크 (지원금·축제)")
-    st.caption(
-        "지원금/제도는 정부24(보조금24)·복지로, 축제/행사는 한국관광공사 '대한민국 구석구석'(TourAPI)에서 "
-        "공식 데이터를 먼저 조회해 그 내용만 근거로 글을 쓰고, 글 속 숫자가 공식 데이터에 실제로 있는지 "
-        "대조합니다. 공공데이터포털(data.go.kr)에서 ①행정안전부 공공서비스(혜택) 정보 ②한국관광공사 국문 "
-        "관광정보 서비스 ③(선택)한국사회보장정보원 중앙부처복지서비스를 '활용신청'한 뒤 받은 인증키 하나를 넣으세요."
-    )
-    data_key = st.text_input(
-        "공공데이터포털 인증키",
-        value=st.secrets.get("DATA_GO_KR_KEY", "") if hasattr(st, "secrets") else "",
-        type="password",
-    )
-    require_official = st.checkbox(
-        "공식 근거를 못 찾으면 생성 중단 (권장)", value=True,
-        help="지원금·축제 글에서 공식 데이터와 일치하는 항목을 못 찾으면 추측으로 쓰지 않고 멈춥니다.",
-    )
-    save_official_images = st.checkbox("축제 공식 이미지(대한민국 구석구석) 저장", value=True,
-                                       help="출처·이용조건(공공누리 유형)과 함께 패키지에 담습니다. 상업적 이용 금지 유형은 후보로만 분리합니다.")
-    save_candidate_images = st.checkbox("공식 홈페이지 대표 이미지도 '후보'로 저장", value=False,
-                                        help="저작권이 주최 측에 있어 허락 전에는 발행에 쓸 수 없습니다. 참고·문의용 후보로만 저장됩니다.")
-    make_cards = st.checkbox("지원금 정보 카드 이미지 자동 제작", value=True,
-                             help="금액·대상·기한을 직접 그린 카드 이미지라 저작권 문제가 없습니다.")
-
-    st.divider()
     st.subheader("🔎 공식 링크 자동 검색 (선택)")
     st.caption("네이버 웹문서 검색 상위 결과를 그대로 씁니다 — 그라운딩처럼 '진짜 공식 사이트'인지 "
                "판별해주진 않으니, 자동으로 채워진 링크는 발행 전에 한 번 확인해주세요.")
@@ -1504,38 +1472,13 @@ with col_input:
 
 with col_output:
     if generate or st.session_state.pop("auto_generate_from_title", False):
-        # ── 공식 데이터 우선 조회 (지원금=정부24·복지로 / 축제=대한민국 구석구석 TourAPI) ──
-        fact_pack, official_blocked = None, False
-        if topic.strip() and client is not None and mode in OFFICIAL_MODES:
-            if osrc is None:
-                st.warning("official_sources.py 를 찾지 못해 공식 데이터 조회 없이 진행합니다. (같은 폴더에 파일을 넣어 주세요)")
-            else:
-                with st.spinner("공식 데이터 조회 중 (정부24·복지로·대한민국 구석구석)…"):
-                    fact_pack = osrc.build_fact_pack(mode, topic.strip(), data_key)
-                official_blocked = require_official and not fact_pack.found
-
         if not topic.strip():
             st.error("주제를 입력해 주세요.")
         elif client is None:
             st.error("Google API 키가 필요합니다. 왼쪽 사이드바에서 입력하거나 Secrets에 등록하세요.")
-        elif official_blocked:
-            st.error("🛑 공식 데이터에서 확인되지 않아 글을 만들지 않았습니다 (사실 오류 방지). "
-                     f"사유: {fact_pack.error or '일치하는 항목 없음'}")
-            if fact_pack.candidates:
-                st.markdown("**비슷한 공식 항목 후보** — 아래 이름 중 하나를 그대로 주제에 넣어 다시 시도해 보세요.")
-                for cname, cscore, cref in fact_pack.candidates[:8]:
-                    st.markdown(f"- {cname}  (유사도 {cscore:.2f})")
-            st.caption("공식 근거 없이 쓰려면 사이드바의 '공식 근거를 못 찾으면 생성 중단'을 끄세요. 이 경우 금액·날짜는 직접 확인해야 합니다.")
         else:
             resolved_link1, resolved_link2 = link1_in.strip(), link2_in.strip()
             auto_used = []
-            if fact_pack is not None and fact_pack.found:  # 공식 링크는 검색보다 우선
-                if not resolved_link1 and fact_pack.primary_link:
-                    resolved_link1 = fact_pack.primary_link
-                    auto_used.append(("링크1(공식 데이터)", resolved_link1))
-                if cfg["link_mode"] == "dual" and not resolved_link2 and fact_pack.secondary_link:
-                    resolved_link2 = fact_pack.secondary_link
-                    auto_used.append(("링크2(공식 데이터)", resolved_link2))
             if mode != "쿠팡파트너스":  # 쿠팡파트너스만 실제 발급받은 제휴 링크가 필수라 자동 검색 대상에서 제외
                 if not resolved_link1:
                     found, err = search_official_link(topic.strip(), naver_id, naver_secret, mode)
@@ -1580,9 +1523,6 @@ with col_output:
                     "[공식 홈페이지 본문 발췌 — 가장 신뢰도 높은 1차 자료, 아래 다른 자료보다 우선]\n"
                     + official_page_text + "\n\n" + research_block
                 )
-            if fact_pack is not None and fact_pack.found:
-                # 공식 데이터(정부24·복지로·TourAPI)를 가장 앞에 — 다른 자료와 충돌하면 이쪽이 우선
-                research_block = fact_pack.prompt_block + "\n\n" + research_block
 
             with st.spinner("SEO 구조에 맞춰 글을 작성하는 중…"):
                 try:
@@ -1595,16 +1535,6 @@ with col_output:
                     )
                     checks = run_seo_check(mode, cfg, topic.strip(), title, meta, tags, content, images, output_format)
 
-                    assets = {}
-                    if osrc is not None and mode in OFFICIAL_MODES:
-                        with st.spinner("수치 검증 및 공식 이미지 저장 중…"):
-                            extra_rows, assets = osrc.post_process(
-                                fact_pack, content,
-                                want_images=save_official_images, want_candidates=save_candidate_images,
-                                want_card=make_cards,
-                            )
-                        checks = list(checks) + list(extra_rows)
-
                     st.session_state["result"] = {
                         "title": title, "meta": meta, "tags": tags,
                         "content": content, "format": output_format, "mode": mode,
@@ -1612,7 +1542,6 @@ with col_output:
                         "checks": checks, "auto_used": auto_used, "images": images,
                         "thumbnail_prompt": thumbnail_prompt,
                         "html_repaired": html_repaired, "research_sources": research_sources,
-                        "fact_pack": fact_pack, "assets": assets,
                     }
                     st.session_state["fixed_title"] = ""  # 한 번 쓰고 나면 고정 해제 — 다음 글은 다시 자유롭게 제목 생성
                 except Exception as e:
@@ -1674,60 +1603,6 @@ with col_output:
                 if alt:
                     st.markdown(f"**{label} 대체텍스트:** {alt}")
                 st.code(f"[{label}] {prompt}", language=None)
-
-        # ── 공식 데이터 · 공식 이미지 · 발행 패키지 ──
-        r_fp, r_assets = result.get("fact_pack"), result.get("assets") or {}
-        if osrc is not None and result.get("mode") in OFFICIAL_MODES:
-            st.divider()
-            st.subheader("🏛️ 공식 데이터 근거 · 이미지")
-            if r_fp is not None and r_fp.found:
-                st.success(f"근거: {r_fp.source_label} (조회일 {r_fp.as_of}) — 항목: {r_fp.title}")
-                for n in (r_fp.notes or []):
-                    st.caption(f"ℹ️ {n}")
-                link_bits = [f"[{lab}]({u})" for lab, u in
-                             (("공식 상세", r_fp.primary_link), ("정부24/보조 링크", r_fp.secondary_link), ("공식 홈페이지", r_fp.homepage)) if u]
-                if link_bits:
-                    st.markdown(" · ".join(link_bits))
-                with st.expander("📄 글의 근거가 된 공식 데이터 원문 (발행 전 이것과 대조하세요)"):
-                    st.text(r_fp.facts_text)
-                unv = r_assets.get("unverified") or []
-                if unv:
-                    st.warning("공식 데이터에 없는 숫자가 본문에 있습니다. 원문과 대조해 고치거나 삭제하세요:\n\n"
-                               + "\n".join(f"- **{a}** … {c} …" for a, c in unv))
-            else:
-                st.warning("이 글은 공식 데이터 없이 생성되었습니다. 금액·날짜·자격 조건을 공식 페이지에서 직접 확인한 뒤 발행하세요.")
-
-            if r_assets.get("card"):
-                st.markdown("**정보 카드 이미지** (직접 제작 · 저작권 문제 없음 — 티스토리에 업로드해서 [이미지1] 자리에 사용)")
-                st.image(r_assets["card"])
-                st.download_button("⬇️ 정보 카드 PNG", data=r_assets["card"], file_name="info_card.png",
-                                   mime="image/png", key="dl_info_card")
-
-            if r_assets.get("images"):
-                st.markdown(f"**공식 이미지 {len(r_assets['images'])}장** (대한민국 구석구석 — 출처 문구를 이미지 아래에 꼭 넣으세요)")
-                icols = st.columns(min(3, len(r_assets["images"])))
-                for ii, rec in enumerate(r_assets["images"]):
-                    with icols[ii % len(icols)]:
-                        st.image(rec["bytes"])
-                        st.caption(f"{rec['caption']} · {rec['license']}" + (f"\n⚠️ {rec['warn']}" if rec["warn"] else ""))
-                        st.download_button("⬇️ 저장", data=rec["bytes"], file_name=rec["filename"], key=f"dl_off_img_{ii}")
-            elif result.get("mode") != "지원금/제도":
-                st.caption("저장된 공식 이미지가 없습니다. 직접 촬영한 사진을 쓰거나, 축제 공식 홈페이지에서 이용 허락을 받은 이미지를 사용하세요. "
-                           "실제 행사 사진처럼 보이는 AI 생성 이미지는 오해를 부르므로 쓰지 않는 것을 권장합니다.")
-
-            if r_assets.get("candidates"):
-                with st.expander(f"🚫 사용 금지 후보 이미지 {len(r_assets['candidates'])}장 (이용허락 확인 전 발행 금지)"):
-                    for ci, rec in enumerate(r_assets["candidates"]):
-                        st.image(rec["bytes"], width=260)
-                        st.caption(f"{rec['license']} — ⚠️ {rec['warn']}\n원본: {rec['url']}")
-            for n in (r_assets.get("notes") or []):
-                st.caption(f"· {n}")
-
-            pkg_zip = osrc.build_package_zip(result)
-            st.download_button(
-                "📦 발행 패키지 ZIP (본문 + 공식 데이터 원문 + 이미지 + 출처·체크리스트)",
-                data=pkg_zip, file_name="post_package.zip", mime="application/zip", key="dl_pkg_zip",
-            )
 
         st.divider()
         st.subheader("🕸️ 세부 키워드로 연작 만들기")
@@ -1833,19 +1708,6 @@ with st.expander("📅 여러 주제 한 번에 생성 (배치 — 30일치/1주
                 try:
                     b_link1 = link1_in.strip()
                     b_link2 = link2_in.strip() if cfg["link_mode"] == "dual" else b_link1
-                    b_fact = None
-                    if osrc is not None and mode in OFFICIAL_MODES:
-                        b_fact = osrc.build_fact_pack(mode, t, data_key)
-                        if not b_fact.found:
-                            if require_official:
-                                cand = ", ".join(c[0] for c in b_fact.candidates[:3])
-                                raise RuntimeError("공식 데이터 미확인으로 건너뜀 — " + (b_fact.error or "일치 항목 없음")
-                                                   + (f" / 비슷한 항목: {cand}" if cand else ""))
-                        else:
-                            if not b_link1 and b_fact.primary_link:
-                                b_link1 = b_fact.primary_link
-                            if cfg["link_mode"] == "dual" and not b_link2 and b_fact.secondary_link:
-                                b_link2 = b_fact.secondary_link
                     if mode != "쿠팡파트너스":
                         if not b_link1:
                             found, _ = search_official_link(t, naver_id, naver_secret, mode)
@@ -1873,26 +1735,17 @@ with st.expander("📅 여러 주제 한 번에 생성 (배치 — 30일치/1주
                             "[공식 홈페이지 본문 발췌 — 가장 신뢰도 높은 1차 자료, 아래 다른 자료보다 우선]\n"
                             + b_official_text + "\n\n" + b_research_block
                         )
-                    if b_fact is not None and b_fact.found:
-                        b_research_block = b_fact.prompt_block + "\n\n" + b_research_block
 
                     title, meta, tags, content, images, thumbnail_prompt, html_repaired = generate_post(
                         client, mode, t, b_link1, b_link2, tone_key, length_key, extra.strip(),
                         b_research_block, st.session_state.get("seo_extra_notes", ""),
                         "", output_format,
                     )
-                    b_checks, b_assets = [], {}
-                    if osrc is not None and mode in OFFICIAL_MODES:
-                        b_checks, b_assets = osrc.post_process(
-                            b_fact, content, want_images=save_official_images,
-                            want_candidates=save_candidate_images, want_card=make_cards,
-                        )
                     batch_results.append({
                         "topic": t, "title": title, "meta": meta, "tags": tags,
                         "content": content, "format": output_format, "mode": mode,
                         "images": images, "thumbnail_prompt": thumbnail_prompt,
                         "sources": b_sources, "error": None,
-                        "checks": b_checks, "fact_pack": b_fact, "assets": b_assets,
                     })
                 except Exception as e:
                     batch_results.append({"topic": t, "error": str(e)})
@@ -1914,11 +1767,7 @@ with st.expander("📅 여러 주제 한 번에 생성 (배치 — 30일치/1주
                     continue
                 ext = "html" if r["format"] == "html" else "txt"
                 safe_name = re.sub(r"[\\/:*?\"<>|]", "_", r["title"] or r["topic"])[:60]
-                if osrc is not None and r.get("fact_pack") is not None and r["mode"] in OFFICIAL_MODES:
-                    # 공식 데이터·이미지·출처가 딸린 글은 글마다 패키지(ZIP)를 통째로 넣는다
-                    zf.writestr(f"{idx:02d}_{safe_name}.zip", osrc.build_package_zip(r))
-                else:
-                    zf.writestr(f"{idx:02d}_{safe_name}.{ext}", r["content"])
+                zf.writestr(f"{idx:02d}_{safe_name}.{ext}", r["content"])
         st.download_button(
             "⬇️ 전체 결과 ZIP으로 다운로드", data=zip_buf.getvalue(),
             file_name="batch_posts.zip", mime="application/zip",
@@ -1934,12 +1783,6 @@ with st.expander("📅 여러 주제 한 번에 생성 (배치 — 30일치/1주
                 st.markdown(f"**태그** {tag_chips}")
                 if r.get("sources"):
                     st.caption(f"🔎 리서치 출처 {len(r['sources'])}건 반영됨")
-                if osrc is not None and r.get("fact_pack") is not None and r["mode"] in OFFICIAL_MODES:
-                    _icons = {"ok": "✅", "warn": "⚠️", "bad": "❌"}
-                    for _lab, _st, _det in r.get("checks", []):
-                        st.markdown(f"{_icons.get(_st, '•')} **{_lab}** — {_det}")
-                    st.download_button("📦 이 글의 발행 패키지 ZIP", data=osrc.build_package_zip(r),
-                                       file_name=f"package_{idx:02d}.zip", mime="application/zip", key=f"dl_pkg_{idx}")
                 if r.get("thumbnail_prompt"):
                     st.caption("🖼️ 썸네일 프롬프트")
                     st.code(r["thumbnail_prompt"], language=None)
