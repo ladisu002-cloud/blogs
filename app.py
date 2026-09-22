@@ -2,6 +2,8 @@ import os
 import re
 import time
 import random
+import base64
+import json as _json
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
@@ -365,6 +367,96 @@ def get_client():
     if not api_key:
         return None
     return genai.Client(api_key=api_key)
+
+
+def get_openai_key():
+    """이미지 실제 생성(gpt-image-1)에 쓸 OpenAI API 키. GOOGLE_API_KEY와 같은 패턴으로
+    Secrets → 환경변수 → 사이드바 수동 입력 순으로 찾는다. 텍스트 생성(Gemini)과는
+    완전히 별개 키이며, 이 키가 없어도 글쓰기 기능 자체는 그대로 동작한다(이미지 생성만 비활성화)."""
+    api_key = st.secrets.get("OPENAI_API_KEY", None) or os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        api_key = st.session_state.get("manual_openai_key", "")
+    return api_key or None
+
+
+def generate_image_openai(prompt, api_key, size="1024x1024"):
+    """OpenAI gpt-image-1로 이미지 1장을 실제 생성해서 (base64 PNG 문자열, 에러메시지) 반환.
+    글의 그 문단 내용을 그대로 옮긴 영어 프롬프트를 그대로 넘긴다 — 별도 스타일 프리셋을
+    덧붙이지 않는 이유는, IMAGE_PROMPT_RULES에서 이미 사실적 사진 스타일·구도·조명을
+    프롬프트 자체에 구체적으로 담도록 지시해뒀기 때문(중복 지시로 프롬프트 의도가 흐려지는 걸 방지)."""
+    if not api_key:
+        return None, "OpenAI API 키가 설정되지 않았습니다."
+    try:
+        resp = requests.post(
+            "https://api.openai.com/v1/images/generations",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": "gpt-image-1", "prompt": prompt, "size": size, "n": 1},
+            timeout=120,
+        )
+        if not resp.ok:
+            try:
+                detail = resp.json().get("error", {}).get("message", resp.text[:300])
+            except Exception:
+                detail = resp.text[:300]
+            return None, f"HTTP {resp.status_code}: {detail}"
+        data = resp.json()
+        b64 = data.get("data", [{}])[0].get("b64_json")
+        if not b64:
+            return None, "이미지 데이터를 받지 못했습니다."
+        return b64, None
+    except Exception as e:
+        return None, str(e)
+
+
+def generate_all_images(images, thumbnail_prompt, api_key, progress_cb=None):
+    """본문 이미지 목록 + 썸네일 프롬프트를 순서대로 생성한다.
+    반환: {"이미지1": b64, ..., "__thumbnail__": b64}, {"이미지1": "에러메시지", ...}
+    한 장 실패해도 나머지는 계속 진행하고, 실패한 라벨만 errors에 담아 UI에서 재시도할 수 있게 한다."""
+    results, errors = {}, {}
+    total = len(images) + (1 if thumbnail_prompt else 0)
+    done = 0
+    for label, _alt, prompt in images:
+        b64, err = generate_image_openai(prompt, api_key)
+        if b64:
+            results[label] = b64
+        else:
+            errors[label] = err
+        done += 1
+        if progress_cb:
+            progress_cb(done, total, label)
+    if thumbnail_prompt:
+        b64, err = generate_image_openai(thumbnail_prompt, api_key, size="1024x1024")
+        if b64:
+            results["__thumbnail__"] = b64
+        else:
+            errors["__thumbnail__"] = err
+        done += 1
+        if progress_cb:
+            progress_cb(done, total, "썸네일")
+    return results, errors
+
+
+JB_IMG_STYLE = "width:100%;height:auto;border-radius:12px;margin:18px 0;display:block;"
+
+
+def embed_images_into_content(content, images, generated):
+    """jb-img-slot 자리표시 div를 실제 <img> 태그(base64 data URI)로 치환한다.
+    생성 실패해서 generated에 없는 라벨은 원래 자리표시를 그대로 두어(빈 이미지가 아니라
+    "생성 필요" 상태가 눈에 보이게) 사용자가 재생성 여부를 판단할 수 있게 한다."""
+    for label, alt, _prompt in images:
+        b64 = generated.get(label)
+        if not b64:
+            continue
+        marker = f"[{label}]"
+        img_tag = f'<img src="data:image/png;base64,{b64}" alt="{alt or label}" style="{JB_IMG_STYLE}">'
+        pattern = (
+            rf'<div class="jb-img-slot"[^>]*>🖼️\s*{re.escape(marker)}\s*이 자리에 이미지를 삽입하세요\s*</div>'
+        )
+        content, n = re.subn(pattern, img_tag, content)
+        if not n:
+            # 자리표시가 다른 형태로 남아있는 경우(모델이 일부 변형해서 출력했을 때)를 위한 보조 치환
+            content, _ = re.subn(re.escape(marker), img_tag, content, count=1)
+    return content
 
 
 RESEARCH_MODEL_FALLBACKS = ("gemini-flash-latest", "gemini-flash-lite-latest")
@@ -1275,6 +1367,22 @@ with st.sidebar:
     st.caption("🆓 Gemini Flash 무료 티어 사용 중 (모델은 Google이 자동으로 최신 버전 유지)")
     st.divider()
 
+    st.subheader("🖼️ 이미지 실제 생성 (OpenAI, 선택)")
+    openai_key = get_openai_key()
+    if not openai_key:
+        st.session_state["manual_openai_key"] = st.text_input(
+            "OpenAI API 키 (gpt-image-1)", type="password", key="manual_openai_key_input",
+        )
+        st.caption(
+            "결제수단이 등록된 OpenAI 계정의 키가 필요해요. 비워두면 이미지 생성 없이 "
+            "지금처럼 영어 프롬프트만 제공됩니다.\n\n"
+            "배포 시에는 Streamlit Cloud의 Secrets에 OPENAI_API_KEY로 등록하세요."
+        )
+        openai_key = get_openai_key()
+    else:
+        st.caption("✅ OpenAI 이미지 생성 연결됨")
+    st.divider()
+
     st.subheader("📢 애드센스 자동 삽입 (선택)")
     default_ad = st.secrets.get("ADSENSE_CODE", "") if hasattr(st, "secrets") else ""
     st.session_state["adsense_code"] = st.text_area(
@@ -1603,6 +1711,98 @@ with col_output:
                 if alt:
                     st.markdown(f"**{label} 대체텍스트:** {alt}")
                 st.code(f"[{label}] {prompt}", language=None)
+
+        # ────────────────────────────────────────────────────────
+        # 이미지 실제 생성 + 이미지 포함 통째로 복사
+        # ────────────────────────────────────────────────────────
+        if result["format"] == "html" and (result.get("images") or result.get("thumbnail_prompt")):
+            st.divider()
+            st.subheader("🖼️ 이미지 생성 & 복사")
+            gen_state = result.setdefault("generated_images", {})
+            gen_errors = result.setdefault("image_errors", {})
+
+            if not openai_key:
+                st.caption("사이드바에 OpenAI API 키를 등록하면, 프롬프트를 다른 도구에 옮길 필요 없이 "
+                           "여기서 바로 실제 이미지를 만들어 본문 자리에 채워드려요.")
+            else:
+                missing = [l for l, _, _ in result.get("images", []) if l not in gen_state]
+                need_thumb = bool(result.get("thumbnail_prompt")) and "__thumbnail__" not in gen_state
+                if missing or need_thumb:
+                    if st.button("✨ 이미지 실제로 생성하기", key="gen_images_btn", type="primary"):
+                        progress = st.progress(0.0, text="이미지 생성 준비 중…")
+
+                        def _cb(done, total, label):
+                            progress.progress(done / total, text=f"({done}/{total}) {label} 생성 중…")
+
+                        new_results, new_errors = generate_all_images(
+                            result.get("images", []), result.get("thumbnail_prompt", ""), openai_key, _cb,
+                        )
+                        gen_state.update(new_results)
+                        gen_errors.clear()
+                        gen_errors.update(new_errors)
+                        if new_results:
+                            result["content"] = embed_images_into_content(
+                                result["content"], result.get("images", []), gen_state,
+                            )
+                        st.session_state["result"] = result
+                        progress.progress(1.0, text="완료!")
+                        st.rerun()
+                else:
+                    st.success("✅ 모든 이미지 생성 완료 — 위 미리보기·HTML 코드에 이미 반영되어 있어요.")
+
+                if gen_errors:
+                    for label, err in gen_errors.items():
+                        st.warning(f"{label} 생성 실패: {err}")
+
+            if gen_state:
+                thumb_b64 = gen_state.get("__thumbnail__")
+                preview_items = ([("썸네일", thumb_b64)] if thumb_b64 else []) + [
+                    (label, gen_state.get(label)) for label, _a, _p in result.get("images", []) if gen_state.get(label)
+                ]
+                if preview_items:
+                    cols = st.columns(min(4, len(preview_items)))
+                    for i, (cap, b64) in enumerate(preview_items):
+                        with cols[i % len(cols)]:
+                            st.image(base64.b64decode(b64), caption=cap)
+
+            full_html = f"<h1>{result['title']}</h1>\n{result['content']}"
+            html_js = _json.dumps(full_html)
+            plain_fallback = re.sub(r"<[^>]+>", " ", full_html)
+            plain_js = _json.dumps(plain_fallback)
+            copy_widget = f"""
+            <div style="margin:6px 0 2px;">
+              <button id="copyHtmlBtn" style="background:#1B2A41;color:#fff;border:none;border-radius:8px;
+                padding:12px 22px;font-size:15px;font-weight:700;cursor:pointer;">
+                📋 이미지 포함 전체 복사 (티스토리에 바로 붙여넣기)
+              </button>
+              <span id="copyStatus" style="margin-left:10px;font-size:13px;color:#1F6F63;"></span>
+            </div>
+            <script>
+            const htmlContent = {html_js};
+            const plainContent = {plain_js};
+            document.getElementById("copyHtmlBtn").addEventListener("click", async () => {{
+              const status = document.getElementById("copyStatus");
+              try {{
+                const blobHtml = new Blob([htmlContent], {{type: "text/html"}});
+                const blobText = new Blob([plainContent], {{type: "text/plain"}});
+                const item = new ClipboardItem({{"text/html": blobHtml, "text/plain": blobText}});
+                await navigator.clipboard.write([item]);
+                status.textContent = "✅ 복사됨! 티스토리 글쓰기 화면(기본모드)에 붙여넣으세요.";
+              }} catch (e) {{
+                try {{
+                  await navigator.clipboard.writeText(htmlContent);
+                  status.textContent = "⚠️ 서식 복사가 막혀 있어 HTML 코드로 복사됐어요. 티스토리 'HTML' 모드에 붙여넣으세요.";
+                }} catch (e2) {{
+                  status.textContent = "❌ 복사 실패: " + e2;
+                }}
+              }}
+            }});
+            </script>
+            """
+            components.html(copy_widget, height=64)
+            st.caption("⚠️ 브라우저 보안 정책상 서식(HTML) 복사가 가끔 막힐 수 있어요. 그럴 땐 위 상태 메시지대로 "
+                       "HTML 코드가 텍스트로 복사되니, 티스토리 글쓰기 화면에서 '기본모드' 대신 'HTML' 모드로 "
+                       "전환한 뒤 붙여넣으면 이미지까지 정상적으로 들어갑니다.")
 
         st.divider()
         st.subheader("🕸️ 세부 키워드로 연작 만들기")
