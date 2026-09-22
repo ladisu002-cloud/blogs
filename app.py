@@ -7,7 +7,7 @@ import json as _json
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
-from datetime import date
+from datetime import date, datetime
 from google import genai
 from google.genai import types
 from bs4 import BeautifulSoup
@@ -437,6 +437,34 @@ def generate_all_images(images, thumbnail_prompt, api_key, progress_cb=None):
 
 
 JB_IMG_STYLE = "width:100%;height:auto;border-radius:12px;margin:18px 0;display:block;"
+
+
+def safe_filename(text, max_len=40):
+    """제목/라벨을 실제 파일명으로 써도 안전하게 다듬는다.
+    윈도우 파일명 금지문자를 걷어내고 길이를 제한한다."""
+    cleaned = re.sub(r'[\\/:*?"<>|]', "_", (text or "").strip())
+    cleaned = re.sub(r"\s+", "_", cleaned)
+    return cleaned[:max_len] or "image"
+
+
+def save_images_locally(images_dict, title_or_topic, base_dir="assets"):
+    """생성된 이미지를 로컬 디스크에 실제 파일로 저장한다 — 영상 속 Codex가 만든
+    assets/YYYY-MM-DD_slug/ 구조와 동일. 이 앱을 로컬(streamlit run app.py)에서 돌리고 있으면
+    base_dir는 그 컴퓨터의 실제 폴더가 되고, Streamlit Cloud처럼 파일시스템이 휘발성인
+    환경에서는 세션 동안만 남는다(그래서 복사 버튼은 그대로 안전장치로 남겨둔다).
+    반환: (저장 폴더 절대경로, {label: 파일경로})"""
+    slug = safe_filename(title_or_topic, max_len=40)
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    folder = os.path.join(base_dir, f"{date_str}_{slug}")
+    os.makedirs(folder, exist_ok=True)
+    saved_paths = {}
+    for label, b64 in images_dict.items():
+        filename = "썸네일.png" if label == "__thumbnail__" else f"{label}.png"
+        path = os.path.join(folder, filename)
+        with open(path, "wb") as f:
+            f.write(base64.b64decode(b64))
+        saved_paths[label] = os.path.abspath(path)
+    return os.path.abspath(folder), saved_paths
 
 
 def embed_images_into_content(content, images, generated):
@@ -1744,6 +1772,13 @@ with col_output:
                             result["content"] = embed_images_into_content(
                                 result["content"], result.get("images", []), gen_state,
                             )
+                            # 영상 속 Codex처럼, 생성되는 즉시 로컬 assets/ 폴더에 실제 파일로 저장한다.
+                            # (버튼을 따로 눌러 다운로드하는 게 아니라 생성=저장이 한 번에 끝나는 방식)
+                            saved_folder, saved_paths = save_images_locally(
+                                new_results, result.get("title") or result.get("topic") or "포스트팩토리",
+                            )
+                            result["saved_folder"] = saved_folder
+                            result["saved_paths"] = {**result.get("saved_paths", {}), **saved_paths}
                         st.session_state["result"] = result
                         progress.progress(1.0, text="완료!")
                         st.rerun()
@@ -1754,16 +1789,26 @@ with col_output:
                     for label, err in gen_errors.items():
                         st.warning(f"{label} 생성 실패: {err}")
 
+                if result.get("saved_folder"):
+                    st.caption(f"📁 이미지가 로컬에도 실제 파일로 저장됐어요: `{result['saved_folder']}`")
+
             if gen_state:
                 thumb_b64 = gen_state.get("__thumbnail__")
                 preview_items = ([("썸네일", thumb_b64)] if thumb_b64 else []) + [
                     (label, gen_state.get(label)) for label, _a, _p in result.get("images", []) if gen_state.get(label)
                 ]
                 if preview_items:
+                    title_slug = safe_filename(result.get("title") or result.get("topic") or "포스트팩토리")
                     cols = st.columns(min(4, len(preview_items)))
                     for i, (cap, b64) in enumerate(preview_items):
                         with cols[i % len(cols)]:
-                            st.image(base64.b64decode(b64), caption=cap)
+                            img_bytes = base64.b64decode(b64)
+                            st.image(img_bytes, caption=cap)
+                            st.download_button(
+                                "⬇️ 저장", data=img_bytes,
+                                file_name=f"{title_slug}_{cap}.png", mime="image/png",
+                                key=f"dl_img_{cap}", use_container_width=True,
+                            )
 
             full_html = f"<h1>{result['title']}</h1>\n{result['content']}"
             html_js = _json.dumps(full_html)
