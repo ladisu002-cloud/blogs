@@ -7,7 +7,7 @@ import json as _json
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
-from datetime import date, datetime
+from datetime import date
 from google import genai
 from google.genai import types
 from bs4 import BeautifulSoup
@@ -445,26 +445,6 @@ def safe_filename(text, max_len=40):
     cleaned = re.sub(r'[\\/:*?"<>|]', "_", (text or "").strip())
     cleaned = re.sub(r"\s+", "_", cleaned)
     return cleaned[:max_len] or "image"
-
-
-def save_images_locally(images_dict, title_or_topic, base_dir="assets"):
-    """생성된 이미지를 로컬 디스크에 실제 파일로 저장한다 — 영상 속 Codex가 만든
-    assets/YYYY-MM-DD_slug/ 구조와 동일. 이 앱을 로컬(streamlit run app.py)에서 돌리고 있으면
-    base_dir는 그 컴퓨터의 실제 폴더가 되고, Streamlit Cloud처럼 파일시스템이 휘발성인
-    환경에서는 세션 동안만 남는다(그래서 복사 버튼은 그대로 안전장치로 남겨둔다).
-    반환: (저장 폴더 절대경로, {label: 파일경로})"""
-    slug = safe_filename(title_or_topic, max_len=40)
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    folder = os.path.join(base_dir, f"{date_str}_{slug}")
-    os.makedirs(folder, exist_ok=True)
-    saved_paths = {}
-    for label, b64 in images_dict.items():
-        filename = "썸네일.png" if label == "__thumbnail__" else f"{label}.png"
-        path = os.path.join(folder, filename)
-        with open(path, "wb") as f:
-            f.write(base64.b64decode(b64))
-        saved_paths[label] = os.path.abspath(path)
-    return os.path.abspath(folder), saved_paths
 
 
 def embed_images_into_content(content, images, generated):
@@ -1772,13 +1752,6 @@ with col_output:
                             result["content"] = embed_images_into_content(
                                 result["content"], result.get("images", []), gen_state,
                             )
-                            # 영상 속 Codex처럼, 생성되는 즉시 로컬 assets/ 폴더에 실제 파일로 저장한다.
-                            # (버튼을 따로 눌러 다운로드하는 게 아니라 생성=저장이 한 번에 끝나는 방식)
-                            saved_folder, saved_paths = save_images_locally(
-                                new_results, result.get("title") or result.get("topic") or "포스트팩토리",
-                            )
-                            result["saved_folder"] = saved_folder
-                            result["saved_paths"] = {**result.get("saved_paths", {}), **saved_paths}
                         st.session_state["result"] = result
                         progress.progress(1.0, text="완료!")
                         st.rerun()
@@ -1788,9 +1761,6 @@ with col_output:
                 if gen_errors:
                     for label, err in gen_errors.items():
                         st.warning(f"{label} 생성 실패: {err}")
-
-                if result.get("saved_folder"):
-                    st.caption(f"📁 이미지가 로컬에도 실제 파일로 저장됐어요: `{result['saved_folder']}`")
 
             if gen_state:
                 thumb_b64 = gen_state.get("__thumbnail__")
